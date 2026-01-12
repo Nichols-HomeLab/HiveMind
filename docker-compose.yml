@@ -1,7 +1,7 @@
 services:
   hivemind:
     build: .
-    image: hivemind:latest
+    image: ghcr.io/nichols-homelab/hivemind:latest
     container_name: hivemind-controller
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
