@@ -6,16 +6,6 @@
 
 HiveMind brings GitOps principles to Docker Swarm, allowing you to manage your entire swarm infrastructure through Git. Similar to Flux for Kubernetes, HiveMind continuously monitors a Git repository and automatically deploys stack changes to your swarm cluster.
 
-## Features
-
-- **GitOps Workflow**: Declare your infrastructure in Git, HiveMind handles deployment
-- **Automatic Reconciliation**: Polls Git repository and syncs changes automatically
-- **Stack Management**: Deploy, update, and remove Docker stacks based on `stacks.yml`
-- **Authentication Support**: HTTP(S) basic auth and SSH key support
-- **Bootstrap Process**: Simple setup similar to `flux bootstrap`
-- **No WebUI Required**: Lightweight, runs as a Docker service on manager nodes
-- **Declarative Configuration**: All configuration in YAML files
-
 ## Quick Start
 
 ### Prerequisites
@@ -23,43 +13,79 @@ HiveMind brings GitOps principles to Docker Swarm, allowing you to manage your e
 - Docker Swarm initialized (`docker swarm init`)
 - Git repository with your stack configurations
 
-### Bootstrap
-
-```bash
-chmod +x bootstrap.sh
-./bootstrap.sh
-```
-
-The bootstrap script will:
-1. Prompt for Git repository details
-2. Create `hivemind-config.yml`
-3. Build the Docker image
-4. Provide deployment options
-
 ### Deploy with Docker
 
-**Option 1: Docker Compose (standalone)**
+**Option 1: Using Pre-built Image from GitHub Container Registry**
+```bash
+# Pull the latest image
+docker pull ghcr.io/Nichols-HomeLab/HiveMind:latest
+
+# Run with environment variables
+docker run -d \
+  --name hivemind-controller \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e HIVEMIND_GIT_URL="https://github.com/yourusername/your-infra-repo.git" \
+  -e HIVEMIND_GIT_BRANCH="main" \
+  -e HIVEMIND_GIT_PATH="." \
+  -e HIVEMIND_GIT_POLL_INTERVAL="60" \
+  -e HIVEMIND_GIT_USERNAME="your-username" \
+  -e HIVEMIND_GIT_PASSWORD="your-token" \
+  ghcr.io/Nichols-HomeLab/HiveMind:latest
+```
+
+**Option 2: Docker Compose (standalone)**
+
+1. Create a `.env` file or set environment variables:
+```bash
+HIVEMIND_GIT_URL=https://github.com/yourusername/your-infra-repo.git
+HIVEMIND_GIT_BRANCH=main
+HIVEMIND_GIT_PATH=.
+HIVEMIND_GIT_POLL_INTERVAL=60
+HIVEMIND_GIT_USERNAME=your-username
+HIVEMIND_GIT_PASSWORD=your-token
+```
+
+2. Deploy:
 ```bash
 docker-compose up -d
 ```
 
-**Option 2: Docker Swarm (production)**
+**Option 3: Docker Swarm (production)**
 ```bash
 docker swarm init  # if not already initialized
 docker stack deploy -c hivemind-stack.yml hivemind
 ```
 
-**Using Makefile:**
-```bash
-make build           # Build image
-make deploy-compose  # Deploy with compose
-make deploy-swarm    # Deploy to swarm
-make logs            # View logs
-```
-
 ## Configuration
 
-### HiveMind Configuration (`hivemind-config.yml`)
+HiveMind can be configured using either environment variables or a YAML configuration file.
+
+### Environment Variables
+
+When using Docker Compose or running the container directly, configure HiveMind using these environment variables:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `HIVEMIND_GIT_URL` | **Yes** | - | Git repository URL (HTTPS) |
+| `HIVEMIND_GIT_BRANCH` | No | `main` | Git branch to monitor |
+| `HIVEMIND_GIT_PATH` | No | `.` | Path within repo where stacks.yml is located |
+| `HIVEMIND_GIT_POLL_INTERVAL` | No | `60` | Seconds between Git polls |
+| `HIVEMIND_GIT_USERNAME` | No | - | Username for private repos (HTTPS) |
+| `HIVEMIND_GIT_PASSWORD` | No | - | Password/token for private repos (HTTPS) |
+
+**Example `.env` file:**
+```bash
+HIVEMIND_GIT_URL=https://github.com/yourusername/your-infra-repo.git
+HIVEMIND_GIT_BRANCH=main
+HIVEMIND_GIT_PATH=.
+HIVEMIND_GIT_POLL_INTERVAL=60
+HIVEMIND_GIT_USERNAME=your-username
+HIVEMIND_GIT_PASSWORD=ghp_your_github_token
+```
+
+### HiveMind Configuration File (`hivemind-config.yml`)
+
+Alternatively, use a YAML configuration file:
 
 ```yaml
 git:
@@ -89,6 +115,27 @@ stacks:
     enabled: false  # Disabled stacks won't be deployed
 ```
 
+## Docker Image
+
+HiveMind is automatically built and published to GitHub Container Registry on every push to `main` that modifies the `src/` directory.
+
+**Available Images:**
+- `ghcr.io/yourusername/hivemind:latest` - Latest stable build from main branch
+- `ghcr.io/yourusername/hivemind:main` - Main branch build
+- `ghcr.io/yourusername/hivemind:main-<sha>` - Specific commit SHA
+
+**Pull the image:**
+```bash
+docker pull ghcr.io/yourusername/hivemind:latest
+```
+
+**Docker Compose Configuration:**
+
+The `docker-compose.yml` includes:
+- Volume mount for Docker socket (`/var/run/docker.sock`)
+- Environment variable configuration
+- Automatic restart policy
+
 ## Project Structure
 
 **HiveMind Repository:**
@@ -100,6 +147,9 @@ HiveMind/
 │   ├── controller.py             # Main controller
 │   ├── git_manager.py            # Git operations
 │   └── stack_manager.py          # Stack management
+├── .github/
+│   └── workflows/
+│       └── docker-publish.yml    # CI/CD for image builds
 ├── examples/                     # Example configurations
 ├── Dockerfile                    # Container image
 ├── docker-compose.yml            # Compose deployment
@@ -157,4 +207,4 @@ MIT
 
 ## Contributing
 
-Contributions welcome! Please open an issue or PR.
+Contributions welcome! Please open an issue or PR. I am a single developer in my free time using/making this so bear with me.
