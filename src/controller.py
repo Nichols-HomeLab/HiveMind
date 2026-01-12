@@ -22,7 +22,8 @@ class HiveMind:
         self.work_dir = Path(tempfile.gettempdir()) / "hivemind"
         self.work_dir.mkdir(exist_ok=True)
         
-        self.git_repo = GitRepository(self.config['git'], str(self.work_dir))
+        git_config = GitConfig(**self.config['git'])
+        self.git_repo = GitRepository(git_config, str(self.work_dir))
         self.stack_manager = SwarmStackManager()
         self.running = False
     
