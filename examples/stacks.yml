@@ -1,0 +1,4 @@
+stacks:
+  - name: hivemind-test
+    compose_file: examples/hivemind-test/whoami.yml
+    enabled: true
