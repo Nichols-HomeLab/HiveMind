@@ -5,25 +5,15 @@
     "docker:pinDigests"
   ],
   "automerge": false,
-  "ignoreTests": true,
-  "packageRules": [
-    {
-      "matchDatasources": ["docker"],
-      "matchUpdateTypes": ["minor", "patch", "digest"],
-      "automerge": true
-    },
-    {
-      "matchDatasources": ["pypi"],
-      "matchUpdateTypes": ["minor", "patch"],
-      "automerge": true
-    },
-    {
-      "matchDatasources": ["docker", "pypi"],
-      "matchUpdateTypes": ["major"],
-      "automerge": false
-    }
+  "enabledManagers": [
+    "dockerfile",
+    "github-actions",
+    "pip_requirements"
   ],
   "pip_requirements": {
-    "fileMatch": ["(^|/)requirements\\.txt$"]
+    "fileMatch": [
+      "(^|/)requirements\\.txt$",
+      "(^|/)requirements\\.(dev|test|prod)\\.txt$"
+    ]
   }
 }
