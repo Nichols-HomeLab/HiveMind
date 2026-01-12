@@ -189,6 +189,7 @@ def test_reconcile_removes_disabled_stacks(mock_stack_manager, mock_git_repo, co
 def test_bootstrap(mock_stack_manager, mock_git_repo, config_file):
     """Test bootstrap functionality"""
     hivemind = HiveMind(config_file)
+    hivemind.git_repo.current_commit = None
     hivemind.git_repo.clone_or_pull = Mock(return_value=True)
     hivemind.git_repo.get_file_path = Mock(return_value=Path("/nonexistent/stacks.yml"))
     hivemind.bootstrap()
@@ -201,8 +202,8 @@ def test_bootstrap(mock_stack_manager, mock_git_repo, config_file):
 def test_run_loop(mock_sleep, mock_stack_manager, mock_git_repo, config_file):
     """Test main run loop"""
     hivemind = HiveMind(config_file)
-    hivemind.git_repo.clone_or_pull = Mock(return_value=False)
     hivemind.git_repo.current_commit = "abc123"
+    hivemind.git_repo.clone_or_pull = Mock(return_value=False)
     
     mock_sleep.side_effect = [None, KeyboardInterrupt()]
     
