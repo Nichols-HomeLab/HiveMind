@@ -107,21 +107,6 @@ HiveMind/
 ├── bootstrap.sh                  # Bootstrap script
 └── hivemind-config.yml           # Your config (gitignored)
 ```
-
-**Your Infrastructure Repository:**
-```
-your-infra-repo/
-├── stacks.yml                    # Main stacks configuration
-└── stacks/
-    ├── traefik/
-    │   ├── docker-compose.yml
-    │   └── .env
-    ├── monitoring/
-    │   └── docker-compose.yml
-    └── app/
-        └── docker-compose.yml
-```
-
 ## How It Works
 
 1. **Initialization**: HiveMind clones your Git repository
@@ -160,22 +145,11 @@ See the `examples/` directory for:
 - Traefik reverse proxy stack
 - Monitoring stack (Prometheus + Grafana)
 
-## Comparison with Flux
-
-| Feature | Flux (Kubernetes) | HiveMind (Swarm) |
-|---------|------------------|------------------|
-| GitOps | ✅ | ✅ |
-| Auto-sync | ✅ | ✅ |
-| Bootstrap | ✅ | ✅ |
-| Multi-tenancy | ✅ | ⏳ Roadmap |
-| WebUI | ❌ | ⏳ Roadmap |
-| CLI | ✅ | ⏳ Roadmap |
-| Helm Support | ✅ | N/A |
-| Kustomize | ✅ | N/A |
 
 ## Roadmap
 
-See `ROADMAP.md` for planned features including CLI and WebUI.
+Notificatons on rollout/failures
+Webui to view rollout/faliures like weave
 
 ## License
 

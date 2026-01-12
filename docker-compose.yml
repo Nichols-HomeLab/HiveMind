@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   hivemind:
     build: .
@@ -7,9 +5,14 @@ services:
     container_name: hivemind-controller
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./hivemind-config.yml:/app/config/hivemind-config.yml:ro
     environment:
       - PYTHONUNBUFFERED=1
+      - HIVEMIND_GIT_URL=
+      - HIVEMIND_GIT_BRANCH=main
+      - HIVEMIND_GIT_PATH=.
+      - HIVEMIND_GIT_POLL_INTERVAL=60
+      - HIVEMIND_GIT_USERNAME=
+      - HIVEMIND_GIT_PASSWORD=
     restart: unless-stopped
     networks:
       - hivemind

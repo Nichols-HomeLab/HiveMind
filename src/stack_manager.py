@@ -30,14 +30,14 @@ class SwarmStackManager:
         """Deploy or update a Docker stack"""
         try:
             logger.info(f"Deploying stack: {stack.name}")
-            
+
             compose_hash = self._calculate_stack_hash(compose_path, env_file)
-            
+
             if stack.name in self.deployed_stacks:
                 if self.deployed_stacks[stack.name] == compose_hash:
                     logger.info(f"Stack {stack.name} is up to date")
                     return True
-            
+
             cmd = ["docker", "stack", "deploy", "-c", str(compose_path)]
             env = None
             
@@ -56,7 +56,7 @@ class SwarmStackManager:
             )
             logger.info(f"Stack {stack.name} deployed successfully")
             logger.debug(result.stdout)
-            
+
             self.deployed_stacks[stack.name] = compose_hash
             return True
             
