@@ -35,4 +35,4 @@ jobs:
 
       - name: Test Docker image
         run: |
-          docker run --rm hivemind:test python3 -c "import src.main; import src.controller; import src.git_manager; import src.stack_manager; print('All imports successful')"
+          docker run --rm hivemind:test sh -c "python3 -c 'from src import main, controller, git_manager, stack_manager; print(\"All imports successful\")'"
