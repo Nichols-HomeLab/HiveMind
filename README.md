@@ -1,6 +1,6 @@
 # HiveMind
 
-**GitOps for Docker Swarm** - A Flux-inspired continuous deployment system for managing Docker Swarm stacks declaratively from Git.
+**GitOps for Docker Swarm** - A Flux-inspired continuous deployment system for managing Docker Swarm stacks declaratively from Git. **Assisted by claude and codex**
 
 ## Overview
 
