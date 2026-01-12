@@ -3,13 +3,16 @@ services:
     image: hivemind:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./hivemind-config.yml:/app/config/hivemind-config.yml:ro
+    configs:
+      - source: hivemind-config
+        target: /app/config/hivemind-config.yml
+        mode: 0444
     deploy:
       mode: replicated
       replicas: 1
       placement:
         constraints:
-          - node.hostname == ms-01
+          - node.role == manager
       restart_policy:
         condition: on-failure
         delay: 5s
@@ -20,3 +23,7 @@ services:
 networks:
   hivemind:
     driver: overlay
+
+configs:
+  hivemind-config:
+    file: ./hivemind-config.yml
