@@ -33,15 +33,20 @@ class HiveMind:
             return yaml.safe_load(f)
     
     def _load_stacks_config(self) -> List[StackConfig]:
-        """Load stacks configuration from repository"""
-        stacks_file = self.git_repo.get_file_path("stacks.yml")
-        
-        if not stacks_file.exists():
-            logger.warning(f"stacks.yml not found at {stacks_file}")
+        """Load stacks configuration from repository or local config"""
+        stacks_path = self.config.get("stacks_file", "stacks.yml")
+        stacks_file = self.git_repo.get_file_path(stacks_path)
+        stacks_data = None
+
+        if stacks_file.exists():
+            with open(stacks_file, 'r') as f:
+                stacks_data = yaml.safe_load(f)
+        elif self.config.get("stacks"):
+            stacks_data = {"stacks": self.config.get("stacks")}
+            logger.info("Using stacks defined in HiveMind config")
+        else:
+            logger.warning(f"Stacks configuration not found at {stacks_file}")
             return []
-        
-        with open(stacks_file, 'r') as f:
-            stacks_data = yaml.safe_load(f)
         
         stacks = []
         for stack_data in stacks_data.get('stacks', []):

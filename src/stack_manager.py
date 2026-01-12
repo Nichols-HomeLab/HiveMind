@@ -1,5 +1,6 @@
 """Docker Swarm stack management"""
 
+import os
 import subprocess
 import hashlib
 import logging
@@ -30,7 +31,7 @@ class SwarmStackManager:
         try:
             logger.info(f"Deploying stack: {stack.name}")
             
-            compose_hash = self._calculate_file_hash(compose_path)
+            compose_hash = self._calculate_stack_hash(compose_path, env_file)
             
             if stack.name in self.deployed_stacks:
                 if self.deployed_stacks[stack.name] == compose_hash:
@@ -38,13 +39,21 @@ class SwarmStackManager:
                     return True
             
             cmd = ["docker", "stack", "deploy", "-c", str(compose_path)]
+            env = None
             
             if env_file and env_file.exists():
                 logger.info(f"Loading environment from {env_file}")
+                env = self._load_env_file(env_file)
             
             cmd.append(stack.name)
             
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env
+            )
             logger.info(f"Stack {stack.name} deployed successfully")
             logger.debug(result.stdout)
             
@@ -92,3 +101,23 @@ class SwarmStackManager:
             for byte_block in iter(lambda: f.read(4096), b""):
                 sha256_hash.update(byte_block)
         return sha256_hash.hexdigest()
+
+    def _calculate_stack_hash(self, compose_path: Path, env_file: Optional[Path]) -> str:
+        """Calculate stack hash based on compose file and env file"""
+        sha256_hash = hashlib.sha256()
+        sha256_hash.update(self._calculate_file_hash(compose_path).encode("utf-8"))
+        if env_file and env_file.exists():
+            sha256_hash.update(self._calculate_file_hash(env_file).encode("utf-8"))
+        return sha256_hash.hexdigest()
+
+    def _load_env_file(self, env_file: Path) -> dict:
+        """Load env vars from a file for docker stack deploy"""
+        env = dict(**os.environ)
+        with open(env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                env[key] = value
+        return env
