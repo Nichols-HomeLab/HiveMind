@@ -1,0 +1,29 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "docker:pinDigests"
+  ],
+  "automerge": false,
+  "ignoreTests": true,
+  "packageRules": [
+    {
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "automerge": true
+    },
+    {
+      "matchDatasources": ["pypi"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true
+    },
+    {
+      "matchDatasources": ["docker", "pypi"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    }
+  ],
+  "pip_requirements": {
+    "fileMatch": ["(^|/)requirements\\.txt$"]
+  }
+}
