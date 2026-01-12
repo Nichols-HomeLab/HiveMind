@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
-logger = logging.getLogger('hivemind.stack')
+logger = logging.getLogger("hivemind.stack")
 
 
 @dataclass
@@ -67,13 +67,7 @@ class SwarmStackManager:
             cmd.append(stack.name)
             logger.debug(f"Executing docker command: {' '.join(cmd[:4])} ... {stack.name}")
             
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                env=env
-            )
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
             logger.info(f"Stack {stack.name} deployed successfully")
             if result.stdout:
                 logger.debug(f"Docker output: {result.stdout}")
@@ -102,10 +96,7 @@ class SwarmStackManager:
         
         try:
             result = subprocess.run(
-                ["docker", "stack", "rm", stack_name],
-                check=True,
-                capture_output=True,
-                text=True
+                ["docker", "stack", "rm", stack_name], check=True, capture_output=True, text=True
             )
             logger.info(f"Stack {stack_name} removed successfully")
             if result.stdout:
@@ -131,12 +122,9 @@ class SwarmStackManager:
         logger.debug("Listing deployed Docker stacks")
         try:
             result = subprocess.run(
-                ["docker", "stack", "ls", "--format", "{{.Name}}"],
-                check=True,
-                capture_output=True,
-                text=True
+                ["docker", "stack", "ls", "--format", "{{.Name}}"], check=True, capture_output=True, text=True
             )
-            stacks = [line.strip() for line in result.stdout.split('\n') if line.strip()]
+            stacks = [line.strip() for line in result.stdout.split("\n") if line.strip()]
             logger.debug(f"Found {len(stacks)} deployed stack(s): {stacks}")
             return stacks
         except subprocess.CalledProcessError as e:

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
 
-logger = logging.getLogger('hivemind.git')
+logger = logging.getLogger("hivemind.git")
 
 
 @dataclass
@@ -163,10 +163,14 @@ class GitRepository:
             logger.debug(f"Using credentials for user: {self.config.username}")
             url = self.config.url
             if url.startswith("https://"):
-                url = url.replace("https://", f"https://{self.config.username}:{self.config.password}@")
+                url = url.replace(
+                    "https://", f"https://{self.config.username}:{self.config.password}@"
+                )
                 logger.debug("Added credentials to HTTPS URL")
             elif url.startswith("http://"):
-                url = url.replace("http://", f"http://{self.config.username}:{self.config.password}@")
+                url = url.replace(
+                    "http://", f"http://{self.config.username}:{self.config.password}@"
+                )
                 logger.debug("Added credentials to HTTP URL")
             else:
                 logger.warning(f"URL scheme not recognized for authentication: {url}")

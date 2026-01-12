@@ -13,17 +13,16 @@ import yaml
 
 from .controller import HiveMind
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger('hivemind')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("hivemind")
+
 
 def strip_quotes(value):
     """Strip surrounding quotes from environment variable values"""
     if value and isinstance(value, str):
         return value.strip('"').strip("'")
     return value
+
 
 def _build_config_from_env() -> dict:
     git_cfg = {

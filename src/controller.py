@@ -10,7 +10,7 @@ from typing import List
 from .git_manager import GitRepository, GitConfig
 from .stack_manager import SwarmStackManager, StackConfig
 
-logger = logging.getLogger('hivemind.controller')
+logger = logging.getLogger("hivemind.controller")
 
 
 class HiveMind:
@@ -44,7 +44,7 @@ class HiveMind:
         """Load HiveMind configuration"""
         logger.debug(f"Loading configuration from {self.config_path}")
         try:
-            with open(self.config_path, 'r') as f:
+            with open(self.config_path, "r") as f:
                 config = yaml.safe_load(f)
             logger.debug(f"Configuration keys: {list(config.keys())}")
             return config
@@ -70,7 +70,7 @@ class HiveMind:
         if stacks_file.exists():
             logger.info(f"Loading stacks from repository file: {stacks_file}")
             try:
-                with open(stacks_file, 'r') as f:
+                with open(stacks_file, "r") as f:
                     stacks_data = yaml.safe_load(f)
                 logger.debug(f"Loaded stacks data from file")
             except yaml.YAMLError as e:
@@ -101,7 +101,7 @@ class HiveMind:
     
     def reconcile(self):
         """Reconcile desired state with actual state"""
-        logger.info("="*60)
+        logger.info("=" * 60)
         logger.info("Starting reconciliation")
         logger.debug(f"Current commit: {self.git_repo.current_commit}")
         
@@ -169,7 +169,7 @@ class HiveMind:
                     logger.error(f"Failed to remove stack {stack_name}: {e}", exc_info=True)
         
         logger.info("Reconciliation complete")
-        logger.info("="*60)
+        logger.info("=" * 60)
     
     def run(self):
         """Run the main reconciliation loop"""
@@ -205,7 +205,7 @@ class HiveMind:
     
     def bootstrap(self):
         """Bootstrap HiveMind - initial setup"""
-        logger.info("="*60)
+        logger.info("=" * 60)
         logger.info("Bootstrapping HiveMind")
         logger.debug("Bootstrap mode: performing initial setup")
         
@@ -225,4 +225,4 @@ class HiveMind:
             raise
         
         logger.info("Bootstrap complete")
-        logger.info("="*60)
+        logger.info("=" * 60)
