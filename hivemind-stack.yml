@@ -1,0 +1,22 @@
+services:
+  controller:
+    image: hivemind:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./hivemind-config.yml:/app/config/hivemind-config.yml:ro
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+    networks:
+      - hivemind
+
+networks:
+  hivemind:
+    driver: overlay
