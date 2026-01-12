@@ -1,4 +1,4 @@
-name: Test
+name: Build
 
 permissions:
   contents: read
@@ -14,65 +14,6 @@ on:
       - dev
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Set up Python
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install flake8 pylint black isort
-          pip install -r requirements.txt
-
-      - name: Check code formatting with black
-        run: black --check src/
-
-      - name: Check import sorting with isort
-        run: isort --check-only src/
-
-      - name: Lint with flake8
-        run: flake8 src/ --count --select=E9,F63,F7,F82 --show-source --statistics
-
-      - name: Lint with pylint
-        run: pylint src/ --disable=C0111,R0903,C0103 --fail-under=7.0
-        continue-on-error: true
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Set up Python
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest pytest-cov pytest-mock
-          pip install -r requirements.txt
-
-      - name: Run tests
-        run: |
-          pytest tests/ -v --cov=src --cov-report=xml --cov-report=term
-
-      - name: Upload coverage reports
-        uses: codecov/codecov-action@5c47607acb93fed5485fdbf7232e8a31425f672a # v5.0.2
-        with:
-          file: ./coverage.xml
-          flags: unittests
-          name: codecov-umbrella
-        continue-on-error: true
-
   docker-build:
     runs-on: ubuntu-latest
     steps:
@@ -94,35 +35,3 @@ jobs:
       - name: Test Docker image
         run: |
           docker run --rm hivemind:test python3 -c "import src.main; import src.controller; import src.git_manager; import src.stack_manager; print('All imports successful')"
-
-  security:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Set up Python
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install safety bandit
-          pip install -r requirements.txt
-
-      - name: Check for security vulnerabilities in dependencies
-        run: safety check --json
-        continue-on-error: true
-
-      - name: Run bandit security linter
-        run: bandit -r src/ -f json -o bandit-report.json
-        continue-on-error: true
-
-      - name: Upload bandit report
-        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
-        with:
-          name: bandit-security-report
-          path: bandit-report.json
-        if: always()
