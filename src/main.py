@@ -19,15 +19,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger('hivemind')
 
+def strip_quotes(value):
+    """Strip surrounding quotes from environment variable values"""
+    if value and isinstance(value, str):
+        return value.strip('"').strip("'")
+    return value
 
 def _build_config_from_env() -> dict:
-    logger.debug("Building configuration from environment variables")
     git_cfg = {
-        "url": os.environ.get("HIVEMIND_GIT_URL"),
-        "branch": os.environ.get("HIVEMIND_GIT_BRANCH", "main"),
-        "path": os.environ.get("HIVEMIND_GIT_PATH", "."),
-        "username": os.environ.get("HIVEMIND_GIT_USERNAME"),
-        "password": os.environ.get("HIVEMIND_GIT_PASSWORD"),
+        "url": strip_quotes(os.environ.get("HIVEMIND_GIT_URL")),
+        "branch": strip_quotes(os.environ.get("HIVEMIND_GIT_BRANCH", "main")),
+        "path": strip_quotes(os.environ.get("HIVEMIND_GIT_PATH", ".")),
+        "username": strip_quotes(os.environ.get("HIVEMIND_GIT_USERNAME")),
+        "password": strip_quotes(os.environ.get("HIVEMIND_GIT_PASSWORD")),
         "poll_interval": int(os.environ.get("HIVEMIND_GIT_POLL_INTERVAL", "60")),
     }
     
