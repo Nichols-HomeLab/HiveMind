@@ -24,16 +24,6 @@ def strip_quotes(value):
     return value
 
 
-def _redact_sensitive_config(config: dict) -> dict:
-    """Redact sensitive fields from config for safe logging"""
-    redacted = dict(config)
-    if "password" in redacted and redacted["password"]:
-        redacted["password"] = "***REDACTED***"
-    if "username" in redacted and redacted["username"]:
-        redacted["username"] = "***REDACTED***"
-    return redacted
-
-
 def _build_config_from_env() -> dict:
     git_cfg = {
         "url": strip_quotes(os.environ.get("HIVEMIND_GIT_URL")),
@@ -44,8 +34,12 @@ def _build_config_from_env() -> dict:
         "poll_interval": int(os.environ.get("HIVEMIND_GIT_POLL_INTERVAL", "60")),
     }
 
-    redacted_cfg = _redact_sensitive_config(git_cfg)
-    logger.debug(f"Git configuration: {redacted_cfg}")
+    logger.debug(
+        "Git configuration initialized for url=%s, branch=%s, path=%s",
+        git_cfg.get("url"),
+        git_cfg.get("branch"),
+        git_cfg.get("path"),
+    )
 
     if not git_cfg["url"]:
         logger.error("Missing required environment variable: HIVEMIND_GIT_URL")
