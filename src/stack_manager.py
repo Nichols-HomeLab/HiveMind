@@ -20,6 +20,17 @@ class StackConfig:
     env_file: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class DeployResult:
+    """Outcome of a stack deployment attempt"""
+    status: str
+    detail: Optional[str] = None
+
+    @property
+    def changed(self) -> bool:
+        return self.status in {"new", "updated"}
+
+
 class SwarmStackManager:
     """Manages Docker Swarm stacks"""
     
@@ -28,7 +39,7 @@ class SwarmStackManager:
         self.deployed_stacks: Dict[str, str] = {}
         logger.info("SwarmStackManager initialized")
     
-    def deploy_stack(self, stack: StackConfig, compose_path: Path, env_file: Optional[Path] = None) -> bool:
+    def deploy_stack(self, stack: StackConfig, compose_path: Path, env_file: Optional[Path] = None) -> DeployResult:
         """Deploy or update a Docker stack"""
         logger.info(f"Starting deployment for stack: {stack.name}")
         logger.debug(f"Compose file: {compose_path}")
@@ -38,15 +49,16 @@ class SwarmStackManager:
             logger.debug(f"Calculating hash for stack {stack.name}")
             compose_hash = self._calculate_stack_hash(compose_path, env_file)
             logger.debug(f"Stack hash: {compose_hash[:16]}...")
+            status = "new"
 
             if stack.name in self.deployed_stacks:
                 previous_hash = self.deployed_stacks[stack.name]
                 logger.debug(f"Previous hash: {previous_hash[:16]}...")
                 if previous_hash == compose_hash:
                     logger.info(f"Stack {stack.name} is up to date (hash match)")
-                    return True
-                else:
-                    logger.info(f"Stack {stack.name} has changes, updating")
+                    return DeployResult(status="unchanged")
+                logger.info(f"Stack {stack.name} has changes, updating")
+                status = "updated"
             else:
                 logger.info(f"Stack {stack.name} is new, deploying")
 
@@ -76,7 +88,7 @@ class SwarmStackManager:
 
             self.deployed_stacks[stack.name] = compose_hash
             logger.debug(f"Updated deployed stacks cache for {stack.name}")
-            return True
+            return DeployResult(status=status)
             
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to deploy stack {stack.name} (exit code {e.returncode}): {e}")
@@ -84,10 +96,10 @@ class SwarmStackManager:
                 logger.error(f"Docker error output: {e.stderr}")
             if e.stdout:
                 logger.debug(f"Docker stdout: {e.stdout}")
-            return False
+            return DeployResult(status="failed", detail=str(e))
         except Exception as e:
             logger.error(f"Unexpected error deploying stack {stack.name}: {e}", exc_info=True)
-            return False
+            return DeployResult(status="failed", detail=str(e))
     
     def remove_stack(self, stack_name: str) -> bool:
         """Remove a Docker stack"""

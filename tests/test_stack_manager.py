@@ -3,7 +3,7 @@
 import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch, mock_open
-from src.stack_manager import SwarmStackManager, StackConfig
+from src.stack_manager import DeployResult, SwarmStackManager, StackConfig
 
 
 @pytest.fixture
@@ -129,7 +129,7 @@ def test_deploy_stack_success(mock_run, stack_manager, stack_config, tmp_path):
     compose_file.write_text("version: '3'")
     mock_run.return_value = Mock(stdout="Stack deployed", returncode=0)
     result = stack_manager.deploy_stack(stack_config, compose_file)
-    assert result is True
+    assert result == DeployResult(status="new")
     assert stack_config.name in stack_manager.deployed_stacks
 
 
@@ -141,7 +141,7 @@ def test_deploy_stack_up_to_date(mock_run, stack_manager, stack_config, tmp_path
     hash_value = stack_manager._calculate_stack_hash(compose_file, None)
     stack_manager.deployed_stacks[stack_config.name] = hash_value
     result = stack_manager.deploy_stack(stack_config, compose_file)
-    assert result is True
+    assert result == DeployResult(status="unchanged")
     mock_run.assert_not_called()
 
 
@@ -154,7 +154,18 @@ def test_deploy_stack_with_env_file(mock_run, stack_manager, stack_config, tmp_p
     env_file.write_text("VAR=value")
     mock_run.return_value = Mock(stdout="Stack deployed", returncode=0)
     result = stack_manager.deploy_stack(stack_config, compose_file, env_file)
-    assert result is True
+    assert result == DeployResult(status="new")
+
+
+@patch('subprocess.run')
+def test_deploy_stack_updated(mock_run, stack_manager, stack_config, tmp_path):
+    """Test stack deployment when an existing stack has changed"""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("version: '3.8'")
+    stack_manager.deployed_stacks[stack_config.name] = "oldhash"
+    mock_run.return_value = Mock(stdout="Stack updated", returncode=0)
+    result = stack_manager.deploy_stack(stack_config, compose_file)
+    assert result == DeployResult(status="updated")
 
 
 @patch('subprocess.run')
@@ -164,4 +175,4 @@ def test_deploy_stack_error(mock_run, stack_manager, stack_config, tmp_path):
     compose_file.write_text("version: '3'")
     mock_run.side_effect = Exception("Docker error")
     result = stack_manager.deploy_stack(stack_config, compose_file)
-    assert result is False
+    assert result.status == "failed"

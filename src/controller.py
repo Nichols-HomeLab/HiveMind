@@ -5,7 +5,7 @@ import yaml
 import logging
 import tempfile
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from .git_manager import GitRepository, GitConfig
 from .stack_manager import SwarmStackManager, StackConfig
@@ -132,6 +132,13 @@ class HiveMind:
             return
         
         enabled_stacks = set()
+        deployment_results: Dict[str, List[str]] = {
+            "new": [],
+            "updated": [],
+            "unchanged": [],
+            "failed": [],
+            "skipped": [],
+        }
         logger.info(f"Processing {len(stacks)} stack(s)")
         
         for stack in stacks:
@@ -143,6 +150,7 @@ class HiveMind:
                 
                 if not compose_path.exists():
                     logger.error(f"Compose file not found for stack {stack.name}: {compose_path}")
+                    deployment_results["failed"].append(stack.name)
                     continue
                 
                 env_file = None
@@ -155,11 +163,14 @@ class HiveMind:
                 
                 logger.info(f"Deploying stack: {stack.name}")
                 try:
-                    self.stack_manager.deploy_stack(stack, compose_path, env_file)
+                    result = self.stack_manager.deploy_stack(stack, compose_path, env_file)
+                    deployment_results.setdefault(result.status, []).append(stack.name)
                 except Exception as e:
                     logger.error(f"Failed to deploy stack {stack.name}: {e}", exc_info=True)
+                    deployment_results["failed"].append(stack.name)
             else:
                 logger.info(f"Stack {stack.name} is disabled, skipping deployment")
+                deployment_results["skipped"].append(stack.name)
         
         logger.debug("Checking for stacks to remove")
         deployed_stacks = set(self.stack_manager.list_stacks())
@@ -180,21 +191,33 @@ class HiveMind:
         logger.info("=" * 60)
 
         if has_changes:
-            self._notify_update(previous_commit, self.git_repo.current_commit, stacks)
+            self._notify_update(previous_commit, self.git_repo.current_commit, deployment_results)
 
-    def _notify_update(self, previous_commit, current_commit, stacks):
+    def _notify_update(self, previous_commit, current_commit, deployment_results: Dict[str, List[str]]):
         if not self.notifier:
             return
-        stack_names = [s.name for s in stacks]
-        summary_lines = [
-            "HiveMind applied updates.",
-            f"Current commit: {current_commit[:8] if current_commit else 'unknown'}",
-        ]
+        updated_count = len(deployment_results.get("updated", []))
+        new_count = len(deployment_results.get("new", []))
+        if new_count or updated_count:
+            headline = "HiveMind applied stack upgrades."
+            subject = "HiveMind upgrade applied"
+        else:
+            headline = "HiveMind synced repository changes. No stack upgrades were needed."
+            subject = "HiveMind repository update"
+
+        summary_lines = [headline, f"Current commit: {current_commit[:8] if current_commit else 'unknown'}"]
         if previous_commit:
             summary_lines.append(f"Previous commit: {previous_commit[:8]}")
-        if stack_names:
-            summary_lines.append(f"Stacks processed: {', '.join(stack_names)}")
-        subject = "HiveMind update applied"
+        for label, key in (
+            ("New stacks", "new"),
+            ("Updated stacks", "updated"),
+            ("Unchanged stacks", "unchanged"),
+            ("Failed stacks", "failed"),
+            ("Skipped disabled stacks", "skipped"),
+        ):
+            stack_names = deployment_results.get(key, [])
+            if stack_names:
+                summary_lines.append(f"{label}: {', '.join(stack_names)}")
         body = "\n".join(summary_lines)
         self.notifier.send(subject, body)
     

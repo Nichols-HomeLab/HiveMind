@@ -5,6 +5,7 @@ import yaml
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 from src.controller import HiveMind
+from src.stack_manager import DeployResult
 
 
 @pytest.fixture
@@ -153,7 +154,7 @@ def test_reconcile_with_changes(mock_stack_manager, mock_git_repo, config_file, 
     
     hivemind.git_repo.get_file_path = Mock(side_effect=[stacks_file, compose_file, compose_file])
     hivemind.stack_manager.list_stacks = Mock(return_value=[])
-    hivemind.stack_manager.deploy_stack = Mock(return_value=True)
+    hivemind.stack_manager.deploy_stack = Mock(return_value=DeployResult(status="updated"))
     
     hivemind.reconcile()
     
@@ -176,7 +177,7 @@ def test_reconcile_removes_disabled_stacks(mock_stack_manager, mock_git_repo, co
     
     hivemind.git_repo.get_file_path = Mock(side_effect=[stacks_file, compose_file, compose_file])
     hivemind.stack_manager.list_stacks = Mock(return_value=["test-stack-2"])
-    hivemind.stack_manager.deploy_stack = Mock(return_value=True)
+    hivemind.stack_manager.deploy_stack = Mock(return_value=DeployResult(status="updated"))
     hivemind.stack_manager.remove_stack = Mock(return_value=True)
     
     hivemind.reconcile()
@@ -211,3 +212,95 @@ def test_run_loop(mock_sleep, mock_stack_manager, mock_git_repo, config_file):
     
     assert hivemind.running is False
     assert mock_sleep.call_count == 1
+
+
+@patch('src.controller.GitRepository')
+@patch('src.controller.SwarmStackManager')
+def test_notify_update_reports_stack_outcomes(mock_stack_manager, mock_git_repo, tmp_path):
+    """Test notification body distinguishes updated stacks from unchanged ones"""
+    config = {
+        "git": {
+            "url": "https://github.com/test/repo.git",
+            "branch": "main",
+            "path": ".",
+            "poll_interval": 60
+        },
+        "notifications": {
+            "smtp": {
+                "host": "smtp.example.com",
+                "port": 587,
+                "username": "user",
+                "password": "pass",
+                "from": "from@example.com",
+                "to": ["to@example.com"]
+            }
+        }
+    }
+    config_path = tmp_path / "config.yml"
+    with open(config_path, "w") as f:
+        yaml.safe_dump(config, f)
+
+    hivemind = HiveMind(str(config_path))
+    hivemind.notifier = Mock()
+
+    hivemind._notify_update(
+        "aaaaaaaa",
+        "bbbbbbbb",
+        {
+            "new": ["new-stack"],
+            "updated": ["updated-stack"],
+            "unchanged": ["same-stack"],
+            "failed": ["bad-stack"],
+            "skipped": ["disabled-stack"],
+        },
+    )
+
+    hivemind.notifier.send.assert_called_once()
+    subject, body = hivemind.notifier.send.call_args.args
+    assert subject == "HiveMind upgrade applied"
+    assert "New stacks: new-stack" in body
+    assert "Updated stacks: updated-stack" in body
+    assert "Unchanged stacks: same-stack" in body
+    assert "Failed stacks: bad-stack" in body
+    assert "Skipped disabled stacks: disabled-stack" in body
+
+
+@patch('src.controller.GitRepository')
+@patch('src.controller.SwarmStackManager')
+def test_notify_update_without_stack_changes(mock_stack_manager, mock_git_repo, tmp_path):
+    """Test notification body for repo-only changes"""
+    config = {
+        "git": {
+            "url": "https://github.com/test/repo.git",
+            "branch": "main",
+            "path": ".",
+            "poll_interval": 60
+        },
+        "notifications": {
+            "smtp": {
+                "host": "smtp.example.com",
+                "port": 587,
+                "username": "user",
+                "password": "pass",
+                "from": "from@example.com",
+                "to": ["to@example.com"]
+            }
+        }
+    }
+    config_path = tmp_path / "config.yml"
+    with open(config_path, "w") as f:
+        yaml.safe_dump(config, f)
+
+    hivemind = HiveMind(str(config_path))
+    hivemind.notifier = Mock()
+
+    hivemind._notify_update(
+        "aaaaaaaa",
+        "bbbbbbbb",
+        {"new": [], "updated": [], "unchanged": ["same-stack"], "failed": [], "skipped": []},
+    )
+
+    hivemind.notifier.send.assert_called_once()
+    subject, body = hivemind.notifier.send.call_args.args
+    assert subject == "HiveMind repository update"
+    assert "No stack upgrades were needed." in body
