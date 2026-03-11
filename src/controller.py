@@ -9,6 +9,7 @@ from typing import List
 
 from .git_manager import GitRepository, GitConfig
 from .stack_manager import SwarmStackManager, StackConfig
+from .notifier import SMTPNotifier
 
 logger = logging.getLogger("hivemind.controller")
 
@@ -36,6 +37,12 @@ class HiveMind:
         logger.debug("Initializing Swarm stack manager")
         self.stack_manager = SwarmStackManager()
         logger.info("Swarm stack manager initialized")
+
+        self.notifier = None
+        smtp_cfg = (self.config.get("notifications") or {}).get("smtp")
+        if smtp_cfg:
+            logger.info("SMTP notifications enabled")
+            self.notifier = SMTPNotifier(smtp_cfg)
         
         self.running = False
         logger.debug("HiveMind initialization complete")
@@ -104,6 +111,7 @@ class HiveMind:
         logger.info("=" * 60)
         logger.info("Starting reconciliation")
         logger.debug(f"Current commit: {self.git_repo.current_commit}")
+        previous_commit = self.git_repo.current_commit
         
         try:
             has_changes = self.git_repo.clone_or_pull()
@@ -170,6 +178,25 @@ class HiveMind:
         
         logger.info("Reconciliation complete")
         logger.info("=" * 60)
+
+        if has_changes:
+            self._notify_update(previous_commit, self.git_repo.current_commit, stacks)
+
+    def _notify_update(self, previous_commit, current_commit, stacks):
+        if not self.notifier:
+            return
+        stack_names = [s.name for s in stacks]
+        summary_lines = [
+            "HiveMind applied updates.",
+            f"Current commit: {current_commit[:8] if current_commit else 'unknown'}",
+        ]
+        if previous_commit:
+            summary_lines.append(f"Previous commit: {previous_commit[:8]}")
+        if stack_names:
+            summary_lines.append(f"Stacks processed: {', '.join(stack_names)}")
+        subject = "HiveMind update applied"
+        body = "\n".join(summary_lines)
+        self.notifier.send(subject, body)
     
     def run(self):
         """Run the main reconciliation loop"""

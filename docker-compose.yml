@@ -13,6 +13,12 @@ services:
       - HIVEMIND_GIT_POLL_INTERVAL=60
       - HIVEMIND_GIT_USERNAME=
       - HIVEMIND_GIT_PASSWORD=
+      - HIVEMIND_SMTP_HOST=ntfy.nicholstech.org
+      - HIVEMIND_SMTP_PORT=1025
+      - HIVEMIND_SMTP_FROM=hivemind@nicholstech.org
+      - HIVEMIND_SMTP_TO=docker@ntfy.nicholstech.org
+      - HIVEMIND_SMTP_PRIORITY=1
+      - HIVEMIND_SMTP_TLS=false
     restart: unless-stopped
     networks:
       - hivemind

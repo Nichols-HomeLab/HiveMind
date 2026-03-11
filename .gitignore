@@ -28,5 +28,7 @@ env.bak/
 venv.bak/
 
 hivemind-config.yml
+hivemind-config.swarm.yml
+gitconfig.hivemind
 *.log
 .DS_Store

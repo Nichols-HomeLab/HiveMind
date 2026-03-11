@@ -34,6 +34,22 @@ def _build_config_from_env() -> dict:
         "poll_interval": int(os.environ.get("HIVEMIND_GIT_POLL_INTERVAL", "60")),
     }
 
+    notifications_cfg = {}
+    smtp_host = strip_quotes(os.environ.get("HIVEMIND_SMTP_HOST"))
+    smtp_to = strip_quotes(os.environ.get("HIVEMIND_SMTP_TO"))
+    if smtp_host and smtp_to:
+        smtp_cfg = {
+            "host": smtp_host,
+            "port": int(os.environ.get("HIVEMIND_SMTP_PORT", "25")),
+            "username": strip_quotes(os.environ.get("HIVEMIND_SMTP_USERNAME")),
+            "password": strip_quotes(os.environ.get("HIVEMIND_SMTP_PASSWORD")),
+            "from": strip_quotes(os.environ.get("HIVEMIND_SMTP_FROM", "hivemind@localhost")),
+            "to": smtp_to,
+            "tls": strip_quotes(os.environ.get("HIVEMIND_SMTP_TLS", "false")).lower() in ("1", "true", "yes", "y"),
+            "priority": int(os.environ.get("HIVEMIND_SMTP_PRIORITY", "1")),
+        }
+        notifications_cfg["smtp"] = smtp_cfg
+
     logger.debug(
         "Git configuration initialized for url=%s, branch=%s, path=%s",
         git_cfg.get("url"),
@@ -46,7 +62,10 @@ def _build_config_from_env() -> dict:
         raise ValueError("Missing required env var HIVEMIND_GIT_URL")
     
     logger.info("Successfully built configuration from environment variables")
-    return {"git": git_cfg}
+    config = {"git": git_cfg}
+    if notifications_cfg:
+        config["notifications"] = notifications_cfg
+    return config
 
 
 def _write_temp_config(config: dict) -> str:

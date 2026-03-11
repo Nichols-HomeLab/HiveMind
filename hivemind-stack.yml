@@ -1,0 +1,27 @@
+services:
+  controller:
+    image: ghcr.io/nichols-homelab/hivemind:latest
+    command: ["/config/hivemind-config.yml"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    secrets:
+      - source: hivemind_config
+        target: /config/hivemind-config.yml
+    networks:
+      - Lab
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: any
+        delay: 5s
+
+networks:
+  Lab:
+    external: true
+
+secrets:
+  hivemind_config:
+    external: true
+    name: hivemind_private_config
