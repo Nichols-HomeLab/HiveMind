@@ -15,9 +15,11 @@ logger = logging.getLogger("hivemind.stack")
 class StackConfig:
     """Docker stack configuration"""
     name: str
-    compose_file: str
+    compose_file: Optional[str] = None
+    compose_files: Optional[List[str]] = None
     enabled: bool = True
     env_file: Optional[str] = None
+    replaces: Optional[List[str]] = None
 
 
 @dataclass(frozen=True)
@@ -39,15 +41,20 @@ class SwarmStackManager:
         self.deployed_stacks: Dict[str, str] = {}
         logger.info("SwarmStackManager initialized")
     
-    def deploy_stack(self, stack: StackConfig, compose_path: Path, env_file: Optional[Path] = None) -> DeployResult:
+    def deploy_stack(
+        self,
+        stack: StackConfig,
+        compose_paths: List[Path],
+        env_file: Optional[Path] = None,
+    ) -> DeployResult:
         """Deploy or update a Docker stack"""
         logger.info(f"Starting deployment for stack: {stack.name}")
-        logger.debug(f"Compose file: {compose_path}")
+        logger.debug(f"Compose files: {compose_paths}")
         logger.debug(f"Environment file: {env_file}")
         
         try:
             logger.debug(f"Calculating hash for stack {stack.name}")
-            compose_hash = self._calculate_stack_hash(compose_path, env_file)
+            compose_hash = self._calculate_stack_hash(compose_paths, env_file)
             logger.debug(f"Stack hash: {compose_hash[:16]}...")
             status = "new"
 
@@ -62,7 +69,9 @@ class SwarmStackManager:
             else:
                 logger.info(f"Stack {stack.name} is new, deploying")
 
-            cmd = ["docker", "stack", "deploy", "-c", str(compose_path)]
+            cmd = ["docker", "stack", "deploy"]
+            for compose_path in compose_paths:
+                cmd.extend(["-c", str(compose_path)])
             env = None
             
             if env_file and env_file.exists():
@@ -163,14 +172,15 @@ class SwarmStackManager:
             logger.error(f"Failed to calculate hash for {file_path}: {e}", exc_info=True)
             raise
 
-    def _calculate_stack_hash(self, compose_path: Path, env_file: Optional[Path]) -> str:
-        """Calculate stack hash based on compose file and env file"""
+    def _calculate_stack_hash(self, compose_paths: List[Path], env_file: Optional[Path]) -> str:
+        """Calculate stack hash based on compose files and env file"""
         logger.debug("Calculating combined stack hash")
         try:
             sha256_hash = hashlib.sha256()
-            compose_hash = self._calculate_file_hash(compose_path)
-            sha256_hash.update(compose_hash.encode("utf-8"))
-            logger.debug("Compose file hash added to stack hash")
+            for compose_path in compose_paths:
+                compose_hash = self._calculate_file_hash(compose_path)
+                sha256_hash.update(compose_hash.encode("utf-8"))
+                logger.debug(f"Compose file hash added to stack hash: {compose_path}")
             
             if env_file and env_file.exists():
                 env_hash = self._calculate_file_hash(env_file)

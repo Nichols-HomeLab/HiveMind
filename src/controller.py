@@ -43,6 +43,8 @@ class HiveMind:
         if smtp_cfg:
             logger.info("SMTP notifications enabled")
             self.notifier = SMTPNotifier(smtp_cfg)
+
+        self.retired_stacks: List[str] = []
         
         self.running = False
         logger.debug("HiveMind initialization complete")
@@ -92,10 +94,16 @@ class HiveMind:
         else:
             logger.warning(f"Stacks configuration not found at {stacks_file}")
             return []
+
+        self.retired_stacks = list(stacks_data.get("retired_stacks", []))
+        if self.retired_stacks:
+            logger.info(f"Loaded {len(self.retired_stacks)} retired stack name(s)")
         
         stacks = []
         for stack_data in stacks_data.get('stacks', []):
             try:
+                if not stack_data.get("compose_file") and not stack_data.get("compose_files"):
+                    raise ValueError("stack requires compose_file or compose_files")
                 stack = StackConfig(**stack_data)
                 stacks.append(stack)
                 logger.debug(f"Loaded stack configuration: {stack.name}")
@@ -132,6 +140,7 @@ class HiveMind:
             return
         
         enabled_stacks = set()
+        obsolete_stacks = set()
         deployment_results: Dict[str, List[str]] = {
             "new": [],
             "updated": [],
@@ -145,11 +154,13 @@ class HiveMind:
             logger.debug(f"Processing stack: {stack.name} (enabled={stack.enabled})")
             if stack.enabled:
                 enabled_stacks.add(stack.name)
-                compose_path = self.git_repo.get_file_path(stack.compose_file)
-                logger.debug(f"Compose file path for {stack.name}: {compose_path}")
-                
-                if not compose_path.exists():
-                    logger.error(f"Compose file not found for stack {stack.name}: {compose_path}")
+                compose_files = stack.compose_files or ([stack.compose_file] if stack.compose_file else [])
+                compose_paths = [self.git_repo.get_file_path(compose_file) for compose_file in compose_files]
+                logger.debug(f"Compose file paths for {stack.name}: {compose_paths}")
+
+                missing_paths = [path for path in compose_paths if not path.exists()]
+                if missing_paths:
+                    logger.error(f"Compose file(s) not found for stack {stack.name}: {missing_paths}")
                     deployment_results["failed"].append(stack.name)
                     continue
                 
@@ -163,8 +174,10 @@ class HiveMind:
                 
                 logger.info(f"Deploying stack: {stack.name}")
                 try:
-                    result = self.stack_manager.deploy_stack(stack, compose_path, env_file)
+                    result = self.stack_manager.deploy_stack(stack, compose_paths, env_file)
                     deployment_results.setdefault(result.status, []).append(stack.name)
+                    if result.status != "failed":
+                        obsolete_stacks.update(stack.replaces or [])
                 except Exception as e:
                     logger.error(f"Failed to deploy stack {stack.name}: {e}", exc_info=True)
                     deployment_results["failed"].append(stack.name)
@@ -175,13 +188,20 @@ class HiveMind:
         logger.debug("Checking for stacks to remove")
         deployed_stacks = set(self.stack_manager.list_stacks())
         managed_stacks = set(s.name for s in stacks)
+        obsolete_stacks.update(self.retired_stacks)
         logger.debug(f"Deployed stacks: {deployed_stacks}")
         logger.debug(f"Managed stacks: {managed_stacks}")
         logger.debug(f"Enabled stacks: {enabled_stacks}")
+        logger.debug(f"Obsolete stacks: {obsolete_stacks}")
         
         for stack_name in deployed_stacks:
-            if stack_name in managed_stacks and stack_name not in enabled_stacks:
-                logger.info(f"Stack {stack_name} is disabled, removing")
+            should_remove_disabled = stack_name in managed_stacks and stack_name not in enabled_stacks
+            should_remove_obsolete = stack_name in obsolete_stacks
+            if should_remove_disabled or should_remove_obsolete:
+                if should_remove_obsolete:
+                    logger.info(f"Stack {stack_name} is obsolete, removing")
+                else:
+                    logger.info(f"Stack {stack_name} is disabled, removing")
                 try:
                     self.stack_manager.remove_stack(stack_name)
                 except Exception as e:

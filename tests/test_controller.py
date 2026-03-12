@@ -187,6 +187,86 @@ def test_reconcile_removes_disabled_stacks(mock_stack_manager, mock_git_repo, co
 
 @patch('src.controller.GitRepository')
 @patch('src.controller.SwarmStackManager')
+def test_reconcile_removes_replaced_and_retired_stacks(mock_stack_manager, mock_git_repo, config_file, tmp_path):
+    """Test that reconciliation removes obsolete stacks after successful deployment"""
+    hivemind = HiveMind(config_file)
+    hivemind.git_repo.clone_or_pull = Mock(return_value=True)
+
+    stacks_file = tmp_path / "stacks.yml"
+    stacks_file.write_text(
+        yaml.safe_dump(
+            {
+                "retired_stacks": ["old-retired"],
+                "stacks": [
+                    {
+                        "name": "grouped-stack",
+                        "compose_files": ["stack1.yml", "stack2.yml"],
+                        "replaces": ["old-stack-1", "old-stack-2"],
+                        "enabled": True,
+                    }
+                ],
+            }
+        )
+    )
+
+    compose_file_1 = tmp_path / "stack1.yml"
+    compose_file_1.write_text("services:\n  one:\n    image: busybox\n")
+    compose_file_2 = tmp_path / "stack2.yml"
+    compose_file_2.write_text("services:\n  two:\n    image: busybox\n")
+
+    hivemind.git_repo.get_file_path = Mock(side_effect=[stacks_file, compose_file_1, compose_file_2])
+    hivemind.stack_manager.list_stacks = Mock(
+        return_value=["grouped-stack", "old-stack-1", "old-stack-2", "old-retired"]
+    )
+    hivemind.stack_manager.deploy_stack = Mock(return_value=DeployResult(status="updated"))
+    hivemind.stack_manager.remove_stack = Mock(return_value=True)
+
+    hivemind.reconcile()
+
+    assert hivemind.stack_manager.remove_stack.call_count == 3
+    hivemind.stack_manager.remove_stack.assert_any_call("old-stack-1")
+    hivemind.stack_manager.remove_stack.assert_any_call("old-stack-2")
+    hivemind.stack_manager.remove_stack.assert_any_call("old-retired")
+
+
+@patch('src.controller.GitRepository')
+@patch('src.controller.SwarmStackManager')
+def test_reconcile_keeps_replaced_stack_when_deploy_fails(mock_stack_manager, mock_git_repo, config_file, tmp_path):
+    """Test that replaced stacks are not removed if the replacement fails to deploy"""
+    hivemind = HiveMind(config_file)
+    hivemind.git_repo.clone_or_pull = Mock(return_value=True)
+
+    stacks_file = tmp_path / "stacks.yml"
+    stacks_file.write_text(
+        yaml.safe_dump(
+            {
+                "stacks": [
+                    {
+                        "name": "grouped-stack",
+                        "compose_file": "stack.yml",
+                        "replaces": ["old-stack"],
+                        "enabled": True,
+                    }
+                ],
+            }
+        )
+    )
+
+    compose_file = tmp_path / "stack.yml"
+    compose_file.write_text("services:\n  one:\n    image: busybox\n")
+
+    hivemind.git_repo.get_file_path = Mock(side_effect=[stacks_file, compose_file])
+    hivemind.stack_manager.list_stacks = Mock(return_value=["grouped-stack", "old-stack"])
+    hivemind.stack_manager.deploy_stack = Mock(return_value=DeployResult(status="failed"))
+    hivemind.stack_manager.remove_stack = Mock(return_value=True)
+
+    hivemind.reconcile()
+
+    hivemind.stack_manager.remove_stack.assert_not_called()
+
+
+@patch('src.controller.GitRepository')
+@patch('src.controller.SwarmStackManager')
 def test_bootstrap(mock_stack_manager, mock_git_repo, config_file):
     """Test bootstrap functionality"""
     hivemind = HiveMind(config_file)

@@ -102,9 +102,16 @@ git:
 ```yaml
 stacks:
   - name: traefik
-    compose_file: stacks/traefik/docker-compose.yml
+    compose_files:
+      - stacks/traefik/traefik.yml
+      - stacks/traefik/authentik.yml
     enabled: true
     env_file: stacks/traefik/.env  # Optional
+    replaces:
+      - old-traefik
+
+retired_stacks:
+  - old-stack-with-no-replacement
   
   - name: monitoring
     compose_file: stacks/monitoring/docker-compose.yml
