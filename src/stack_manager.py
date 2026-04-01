@@ -4,9 +4,10 @@ import os
 import subprocess
 import hashlib
 import logging
+import yaml
 from pathlib import Path
 from typing import Dict, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger("hivemind.stack")
 
@@ -27,6 +28,7 @@ class DeployResult:
     """Outcome of a stack deployment attempt"""
     status: str
     detail: Optional[str] = None
+    image_changes: List[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
@@ -39,6 +41,7 @@ class SwarmStackManager:
     def __init__(self):
         logger.debug("Initializing SwarmStackManager")
         self.deployed_stacks: Dict[str, str] = {}
+        self.deployed_service_images: Dict[str, Dict[str, str]] = {}
         logger.info("SwarmStackManager initialized")
     
     def deploy_stack(
@@ -53,21 +56,26 @@ class SwarmStackManager:
         logger.debug(f"Environment file: {env_file}")
         
         try:
+            service_images = self._extract_service_images(compose_paths)
             logger.debug(f"Calculating hash for stack {stack.name}")
             compose_hash = self._calculate_stack_hash(compose_paths, env_file)
             logger.debug(f"Stack hash: {compose_hash[:16]}...")
             status = "new"
+            image_changes: List[str] = []
 
             if stack.name in self.deployed_stacks:
                 previous_hash = self.deployed_stacks[stack.name]
+                previous_images = self.deployed_service_images.get(stack.name, {})
                 logger.debug(f"Previous hash: {previous_hash[:16]}...")
                 if previous_hash == compose_hash:
                     logger.info(f"Stack {stack.name} is up to date (hash match)")
                     return DeployResult(status="unchanged")
                 logger.info(f"Stack {stack.name} has changes, updating")
                 status = "updated"
+                image_changes = self._describe_image_changes(stack.name, previous_images, service_images)
             else:
                 logger.info(f"Stack {stack.name} is new, deploying")
+                image_changes = self._describe_new_services(stack.name, service_images)
 
             cmd = ["docker", "stack", "deploy"]
             for compose_path in compose_paths:
@@ -96,8 +104,9 @@ class SwarmStackManager:
                 logger.debug(f"Docker stderr: {result.stderr}")
 
             self.deployed_stacks[stack.name] = compose_hash
+            self.deployed_service_images[stack.name] = service_images
             logger.debug(f"Updated deployed stacks cache for {stack.name}")
-            return DeployResult(status=status)
+            return DeployResult(status=status, image_changes=image_changes)
             
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to deploy stack {stack.name} (exit code {e.returncode}): {e}")
@@ -128,6 +137,9 @@ class SwarmStackManager:
             if stack_name in self.deployed_stacks:
                 del self.deployed_stacks[stack_name]
                 logger.debug(f"Removed {stack_name} from deployed stacks cache")
+            if stack_name in self.deployed_service_images:
+                del self.deployed_service_images[stack_name]
+                logger.debug(f"Removed {stack_name} service image cache")
             return True
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to remove stack {stack_name} (exit code {e.returncode}): {e}")
@@ -227,3 +239,54 @@ class SwarmStackManager:
         except Exception as e:
             logger.error(f"Failed to load environment file {env_file}: {e}", exc_info=True)
             raise
+
+    def _extract_service_images(self, compose_paths: List[Path]) -> Dict[str, str]:
+        """Extract final image values for services across compose files."""
+        service_images: Dict[str, str] = {}
+
+        for compose_path in compose_paths:
+            logger.debug(f"Loading compose services from {compose_path}")
+            with open(compose_path, "r") as compose_file:
+                compose_data = yaml.safe_load(compose_file) or {}
+            if not isinstance(compose_data, dict):
+                continue
+
+            services = compose_data.get("services") or {}
+            if not isinstance(services, dict):
+                continue
+            for service_name, service_config in services.items():
+                if not isinstance(service_config, dict):
+                    continue
+                image = service_config.get("image")
+                if isinstance(image, str) and image:
+                    service_images[service_name] = image
+
+        logger.debug("Extracted %d service image(s)", len(service_images))
+        return service_images
+
+    def _describe_image_changes(
+        self,
+        stack_name: str,
+        previous_images: Dict[str, str],
+        current_images: Dict[str, str],
+    ) -> List[str]:
+        """Summarize image updates or new services within an existing stack."""
+        changes: List[str] = []
+
+        for service_name, current_image in sorted(current_images.items()):
+            previous_image = previous_images.get(service_name)
+            if previous_image is None:
+                changes.append(f"Created {stack_name} - {service_name} image: {current_image}")
+            elif previous_image != current_image:
+                changes.append(
+                    f"Updated {stack_name} - {service_name} image: {previous_image} -> {current_image}"
+                )
+
+        return changes
+
+    def _describe_new_services(self, stack_name: str, service_images: Dict[str, str]) -> List[str]:
+        """Summarize services created as part of a new stack."""
+        return [
+            f"Created {stack_name} - {service_name} image: {image}"
+            for service_name, image in sorted(service_images.items())
+        ]

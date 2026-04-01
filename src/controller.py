@@ -147,6 +147,7 @@ class HiveMind:
             "unchanged": [],
             "failed": [],
             "skipped": [],
+            "detail_lines": [],
         }
         logger.info(f"Processing {len(stacks)} stack(s)")
         
@@ -176,6 +177,8 @@ class HiveMind:
                 try:
                     result = self.stack_manager.deploy_stack(stack, compose_paths, env_file)
                     deployment_results.setdefault(result.status, []).append(stack.name)
+                    if result.image_changes:
+                        deployment_results["detail_lines"].extend(result.image_changes)
                     if result.status != "failed":
                         obsolete_stacks.update(stack.replaces or [])
                 except Exception as e:
@@ -238,6 +241,10 @@ class HiveMind:
             stack_names = deployment_results.get(key, [])
             if stack_names:
                 summary_lines.append(f"{label}: {', '.join(stack_names)}")
+        detail_lines = deployment_results.get("detail_lines", [])
+        if detail_lines:
+            summary_lines.append("")
+            summary_lines.extend(detail_lines)
         body = "\n".join(summary_lines)
         self.notifier.send(subject, body)
     

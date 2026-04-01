@@ -35,6 +35,7 @@ def test_stack_config_creation():
 def test_stack_manager_initialization(stack_manager):
     """Test SwarmStackManager initialization"""
     assert isinstance(stack_manager.deployed_stacks, dict)
+    assert isinstance(stack_manager.deployed_service_images, dict)
     assert len(stack_manager.deployed_stacks) == 0
 
 
@@ -93,7 +94,7 @@ def test_calculate_stack_hash_without_env(stack_manager, tmp_path):
     """Test stack hash calculation without env file"""
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text("version: '3'")
-    hash_value = stack_manager._calculate_stack_hash(compose_file, None)
+    hash_value = stack_manager._calculate_stack_hash([compose_file], None)
     assert isinstance(hash_value, str)
     assert len(hash_value) == 64
 
@@ -104,7 +105,7 @@ def test_calculate_stack_hash_with_env(stack_manager, tmp_path):
     compose_file.write_text("version: '3'")
     env_file = tmp_path / ".env"
     env_file.write_text("VAR=value")
-    hash_value = stack_manager._calculate_stack_hash(compose_file, env_file)
+    hash_value = stack_manager._calculate_stack_hash([compose_file], env_file)
     assert isinstance(hash_value, str)
     assert len(hash_value) == 64
 
@@ -126,21 +127,34 @@ def test_load_env_file(stack_manager, tmp_path):
 def test_deploy_stack_success(mock_run, stack_manager, stack_config, tmp_path):
     """Test successful stack deployment"""
     compose_file = tmp_path / "compose.yml"
-    compose_file.write_text("version: '3'")
+    compose_file.write_text(
+        "version: '3'\nservices:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:latest\n"
+    )
     mock_run.return_value = Mock(stdout="Stack deployed", returncode=0)
-    result = stack_manager.deploy_stack(stack_config, compose_file)
-    assert result == DeployResult(status="new")
+    result = stack_manager.deploy_stack(stack_config, [compose_file])
+    assert result.status == "new"
+    assert result.image_changes == [
+        "Created test-stack - bazarr image: lscr.io/linuxserver/bazarr:latest"
+    ]
     assert stack_config.name in stack_manager.deployed_stacks
+    assert stack_manager.deployed_service_images[stack_config.name] == {
+        "bazarr": "lscr.io/linuxserver/bazarr:latest"
+    }
 
 
 @patch('subprocess.run')
 def test_deploy_stack_up_to_date(mock_run, stack_manager, stack_config, tmp_path):
     """Test deploying stack that is already up to date"""
     compose_file = tmp_path / "compose.yml"
-    compose_file.write_text("version: '3'")
-    hash_value = stack_manager._calculate_stack_hash(compose_file, None)
+    compose_file.write_text(
+        "version: '3'\nservices:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:latest\n"
+    )
+    hash_value = stack_manager._calculate_stack_hash([compose_file], None)
     stack_manager.deployed_stacks[stack_config.name] = hash_value
-    result = stack_manager.deploy_stack(stack_config, compose_file)
+    stack_manager.deployed_service_images[stack_config.name] = {
+        "bazarr": "lscr.io/linuxserver/bazarr:latest"
+    }
+    result = stack_manager.deploy_stack(stack_config, [compose_file])
     assert result == DeployResult(status="unchanged")
     mock_run.assert_not_called()
 
@@ -149,30 +163,57 @@ def test_deploy_stack_up_to_date(mock_run, stack_manager, stack_config, tmp_path
 def test_deploy_stack_with_env_file(mock_run, stack_manager, stack_config, tmp_path):
     """Test stack deployment with environment file"""
     compose_file = tmp_path / "compose.yml"
-    compose_file.write_text("version: '3'")
+    compose_file.write_text("version: '3'\nservices:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:latest\n")
     env_file = tmp_path / ".env"
     env_file.write_text("VAR=value")
     mock_run.return_value = Mock(stdout="Stack deployed", returncode=0)
-    result = stack_manager.deploy_stack(stack_config, compose_file, env_file)
-    assert result == DeployResult(status="new")
+    result = stack_manager.deploy_stack(stack_config, [compose_file], env_file)
+    assert result.status == "new"
 
 
 @patch('subprocess.run')
 def test_deploy_stack_updated(mock_run, stack_manager, stack_config, tmp_path):
     """Test stack deployment when an existing stack has changed"""
     compose_file = tmp_path / "compose.yml"
-    compose_file.write_text("version: '3.8'")
+    compose_file.write_text(
+        "version: '3.8'\nservices:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:1.0.0\n"
+    )
     stack_manager.deployed_stacks[stack_config.name] = "oldhash"
+    stack_manager.deployed_service_images[stack_config.name] = {
+        "bazarr": "lscr.io/linuxserver/bazarr:0.9.0"
+    }
     mock_run.return_value = Mock(stdout="Stack updated", returncode=0)
-    result = stack_manager.deploy_stack(stack_config, compose_file)
-    assert result == DeployResult(status="updated")
+    result = stack_manager.deploy_stack(stack_config, [compose_file])
+    assert result.status == "updated"
+    assert result.image_changes == [
+        "Updated test-stack - bazarr image: lscr.io/linuxserver/bazarr:0.9.0 -> lscr.io/linuxserver/bazarr:1.0.0"
+    ]
 
 
 @patch('subprocess.run')
 def test_deploy_stack_error(mock_run, stack_manager, stack_config, tmp_path):
     """Test error handling during stack deployment"""
     compose_file = tmp_path / "compose.yml"
-    compose_file.write_text("version: '3'")
+    compose_file.write_text("version: '3'\nservices:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:latest\n")
     mock_run.side_effect = Exception("Docker error")
-    result = stack_manager.deploy_stack(stack_config, compose_file)
+    result = stack_manager.deploy_stack(stack_config, [compose_file])
     assert result.status == "failed"
+
+
+def test_extract_service_images_overrides_later_compose_files(stack_manager, tmp_path):
+    """Test service images use the final value across compose files."""
+    base_compose = tmp_path / "base.yml"
+    base_compose.write_text(
+        "services:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:latest\n"
+    )
+    override_compose = tmp_path / "override.yml"
+    override_compose.write_text(
+        "services:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:development\n  sonarr:\n    image: lscr.io/linuxserver/sonarr:latest\n"
+    )
+
+    service_images = stack_manager._extract_service_images([base_compose, override_compose])
+
+    assert service_images == {
+        "bazarr": "lscr.io/linuxserver/bazarr:development",
+        "sonarr": "lscr.io/linuxserver/sonarr:latest",
+    }

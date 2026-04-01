@@ -332,6 +332,10 @@ def test_notify_update_reports_stack_outcomes(mock_stack_manager, mock_git_repo,
             "unchanged": ["same-stack"],
             "failed": ["bad-stack"],
             "skipped": ["disabled-stack"],
+            "detail_lines": [
+                "Created new-stack - bazarr image: lscr.io/linuxserver/bazarr:latest",
+                "Updated updated-stack - bazarr image: lscr.io/linuxserver/bazarr:1.0.0 -> lscr.io/linuxserver/bazarr:1.1.0",
+            ],
         },
     )
 
@@ -343,6 +347,11 @@ def test_notify_update_reports_stack_outcomes(mock_stack_manager, mock_git_repo,
     assert "Unchanged stacks: same-stack" in body
     assert "Failed stacks: bad-stack" in body
     assert "Skipped disabled stacks: disabled-stack" in body
+    assert "Created new-stack - bazarr image: lscr.io/linuxserver/bazarr:latest" in body
+    assert (
+        "Updated updated-stack - bazarr image: lscr.io/linuxserver/bazarr:1.0.0 -> lscr.io/linuxserver/bazarr:1.1.0"
+        in body
+    )
 
 
 @patch('src.controller.GitRepository')
