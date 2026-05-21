@@ -22,6 +22,8 @@ COPY src/ /app/src/
 # Create config directory
 RUN mkdir -p /app/config
 
+EXPOSE 8080
+
 # Run HiveMind
 ENTRYPOINT ["python3", "-m", "src.main"]
 CMD ["/app/config/hivemind-config.yml"]

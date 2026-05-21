@@ -3,6 +3,8 @@ services:
     build: .
     image: ghcr.io/nichols-homelab/hivemind:latest
     container_name: hivemind-controller
+    ports:
+      - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -19,6 +21,8 @@ services:
       - HIVEMIND_SMTP_TO=docker@ntfy.nicholstech.org
       - HIVEMIND_SMTP_PRIORITY=1
       - HIVEMIND_SMTP_TLS=false
+      - HIVEMIND_WEBUI_ENABLED=true
+      - HIVEMIND_WEBUI_PORT=8080
     restart: unless-stopped
     networks:
       - hivemind

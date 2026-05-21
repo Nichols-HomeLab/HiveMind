@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from .controller import HiveMind
+from .webui import start as start_webui
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("hivemind")
@@ -110,6 +111,14 @@ def main():
     else:
         logger.info(f"Using configuration file: {config_path}")
     
+    webui_enabled = os.environ.get("HIVEMIND_WEBUI_ENABLED", "true").lower() not in ("false", "0", "no")
+    webui_port = int(os.environ.get("HIVEMIND_WEBUI_PORT", "8080"))
+    if webui_enabled:
+        try:
+            start_webui(port=webui_port)
+        except Exception as e:
+            logger.warning("Failed to start Web UI: %s", e)
+
     try:
         logger.debug("Initializing HiveMind controller")
         hivemind = HiveMind(config_path)
