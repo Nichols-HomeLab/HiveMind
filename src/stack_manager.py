@@ -6,6 +6,7 @@ import hashlib
 import logging
 import yaml
 import codecs
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
@@ -78,10 +79,8 @@ class SwarmStackManager:
                 logger.info(f"Stack {stack.name} is new, deploying")
                 image_changes = self._describe_new_services(stack.name, service_images)
 
-            cmd = ["docker", "stack", "deploy"]
-            for compose_path in compose_paths:
-                cmd.extend(["-c", str(compose_path)])
             env = None
+            rendered_compose: Optional[Path] = None
             
             if env_file and env_file.exists():
                 logger.info(f"Loading environment from {env_file}")
@@ -93,16 +92,21 @@ class SwarmStackManager:
                     logger.warning("Continuing deployment without environment file")
             elif env_file:
                 logger.warning(f"Environment file specified but not found: {env_file}")
-            
-            cmd.append(stack.name)
-            logger.debug(f"Executing docker command: {' '.join(cmd[:4])} ... {stack.name}")
-            
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
-            logger.info(f"Stack {stack.name} deployed successfully")
-            if result.stdout:
-                logger.debug(f"Docker output: {result.stdout}")
-            if result.stderr:
-                logger.debug(f"Docker stderr: {result.stderr}")
+
+            try:
+                rendered_compose = self._render_compose_file(stack.name, compose_paths, env)
+                cmd = ["docker", "stack", "deploy", "--compose-file", str(rendered_compose), stack.name]
+                logger.debug(f"Executing docker command: docker stack deploy ... {stack.name}")
+
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
+                logger.info(f"Stack {stack.name} deployed successfully")
+                if result.stdout:
+                    logger.debug(f"Docker output: {result.stdout}")
+                if result.stderr:
+                    logger.debug(f"Docker stderr: {result.stderr}")
+            finally:
+                if rendered_compose and rendered_compose.exists():
+                    rendered_compose.unlink()
 
             self.deployed_stacks[stack.name] = compose_hash
             self.deployed_service_images[stack.name] = service_images
@@ -292,6 +296,74 @@ class SwarmStackManager:
                 return codecs.decode(value, "unicode_escape")
             return value
         return value
+
+    def _render_compose_file(
+        self,
+        stack_name: str,
+        compose_paths: List[Path],
+        env: Optional[dict],
+    ) -> Path:
+        """Render Compose interpolation and normalize output for Swarm."""
+        cmd = ["docker", "compose"]
+        for compose_path in compose_paths:
+            cmd.extend(["--file", str(compose_path)])
+
+        subprocess.run(
+            [*cmd, "config", "--quiet"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        result = subprocess.run(
+            [*cmd, "config"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        rendered = self._normalize_compose_data(yaml.safe_load(result.stdout) or {})
+
+        handle = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=f".{stack_name}.compose.yml",
+            prefix="hivemind.",
+            delete=False,
+        )
+        with handle:
+            yaml.safe_dump(rendered, handle, sort_keys=False)
+        return Path(handle.name)
+
+    def _normalize_compose_data(self, data: dict) -> dict:
+        """Remove or coerce fields emitted by Compose that Swarm rejects."""
+        if not isinstance(data, dict):
+            return {}
+
+        data.pop("name", None)
+
+        services = data.get("services") or {}
+        if isinstance(services, dict):
+            for service in services.values():
+                if not isinstance(service, dict):
+                    continue
+                service.pop("group_add", None)
+                service.pop("depends_on", None)
+                for port in service.get("ports", []) or []:
+                    if not isinstance(port, dict):
+                        continue
+                    for field in ("target", "published"):
+                        value = port.get(field)
+                        if isinstance(value, str) and value.isdigit():
+                            port[field] = int(value)
+                for mount in (service.get("secrets", []) or []) + (service.get("configs", []) or []):
+                    if not isinstance(mount, dict):
+                        continue
+                    mode = mount.get("mode")
+                    if isinstance(mode, str) and mode.isdigit():
+                        mount["mode"] = int(mode, 8 if mode.startswith("0") else 10)
+
+        return data
 
     def _extract_service_images(self, compose_paths: List[Path]) -> Dict[str, str]:
         """Extract final image values for services across compose files."""

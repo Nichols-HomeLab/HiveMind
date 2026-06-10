@@ -245,14 +245,17 @@ def test_deploy_stack_with_sops_env_file(mock_run, stack_manager, stack_config, 
     mock_run.side_effect = [
         Mock(stdout="VAR=decrypted\n", returncode=0),
         Mock(stdout="VAR=decrypted\n", returncode=0),
+        Mock(stdout="", returncode=0),
+        Mock(stdout="services:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:latest\n", returncode=0),
         Mock(stdout="Stack deployed", returncode=0),
     ]
 
     result = stack_manager.deploy_stack(stack_config, [compose_file], env_file)
 
     assert result.status == "new"
-    deploy_call = mock_run.call_args_list[2]
+    deploy_call = mock_run.call_args_list[-1]
     assert deploy_call.kwargs["env"]["VAR"] == "decrypted"
+    assert deploy_call.args[0][:4] == ["docker", "stack", "deploy", "--compose-file"]
 
 
 @patch('subprocess.run')
@@ -301,3 +304,29 @@ def test_extract_service_images_overrides_later_compose_files(stack_manager, tmp
         "bazarr": "lscr.io/linuxserver/bazarr:development",
         "sonarr": "lscr.io/linuxserver/sonarr:latest",
     }
+
+
+def test_normalize_compose_data_removes_swarm_unsupported_fields(stack_manager):
+    data = {
+        "name": "demo",
+        "services": {
+            "app": {
+                "image": "example/app:latest",
+                "group_add": ["44"],
+                "depends_on": {"db": {"condition": "service_started"}},
+                "ports": [{"target": "8080", "published": "80"}],
+                "secrets": [{"source": "secret", "target": "/secret", "mode": "0440"}],
+                "configs": [{"source": "config", "target": "/config", "mode": "292"}],
+            }
+        },
+    }
+
+    normalized = stack_manager._normalize_compose_data(data)
+
+    assert "name" not in normalized
+    service = normalized["services"]["app"]
+    assert "group_add" not in service
+    assert "depends_on" not in service
+    assert service["ports"] == [{"target": 8080, "published": 80}]
+    assert service["secrets"][0]["mode"] == 0o440
+    assert service["configs"][0]["mode"] == 292
