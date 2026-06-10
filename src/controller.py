@@ -172,6 +172,11 @@ class HiveMind:
                     if not env_file.exists():
                         logger.warning(f"Environment file specified but not found: {env_file}")
                         env_file = None
+                else:
+                    default_env_file = self.git_repo.get_file_path(f"env/{stack.name}.env.sops")
+                    if default_env_file.exists():
+                        env_file = default_env_file
+                        logger.debug(f"Using default SOPS environment file for {stack.name}: {env_file}")
                 
                 logger.info(f"Deploying stack: {stack.name}")
                 try:

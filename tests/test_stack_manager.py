@@ -110,6 +110,26 @@ def test_calculate_stack_hash_with_env(stack_manager, tmp_path):
     assert len(hash_value) == 64
 
 
+@patch('subprocess.run')
+def test_calculate_stack_hash_uses_decrypted_sops_env(mock_run, stack_manager, tmp_path):
+    """Test stack hash changes when decrypted SOPS env content changes"""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("version: '3'")
+    env_file = tmp_path / "stack.env.sops"
+    env_file.write_text("encrypted payload")
+
+    mock_run.side_effect = [
+        Mock(stdout="SECRET=old\n", returncode=0),
+        Mock(stdout="SECRET=new\n", returncode=0),
+    ]
+
+    old_hash = stack_manager._calculate_stack_hash([compose_file], env_file)
+    new_hash = stack_manager._calculate_stack_hash([compose_file], env_file)
+
+    assert old_hash != new_hash
+    assert mock_run.call_args_list[0].args[0][:2] == ["sops", "--decrypt"]
+
+
 def test_load_env_file(stack_manager, tmp_path):
     """Test loading environment variables from file"""
     env_file = tmp_path / ".env"
@@ -121,6 +141,50 @@ def test_load_env_file(stack_manager, tmp_path):
     assert env["VAR2"] == "value2"
     assert "VAR3" in env
     assert env["VAR3"] == "value3"
+
+
+def test_load_env_file_parses_docker_dotenv_quotes(stack_manager, tmp_path):
+    """Test Docker-style env parsing strips wrapping quotes and handles escapes"""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "PLAIN=value\n"
+        "SINGLE='quoted value'\n"
+        'DOUBLE="quoted \\"value\\""\n'
+        "EMPTY=\n"
+    )
+
+    env = stack_manager._load_env_file(env_file)
+
+    assert env["PLAIN"] == "value"
+    assert env["SINGLE"] == "quoted value"
+    assert env["DOUBLE"] == 'quoted "value"'
+    assert env["EMPTY"] == ""
+
+
+@patch('subprocess.run')
+def test_load_sops_env_file_decrypts_before_parsing(mock_run, stack_manager, tmp_path):
+    """Test loading SOPS env files decrypts dotenv content before parsing"""
+    env_file = tmp_path / "stack.env.sops"
+    env_file.write_text("encrypted payload")
+    mock_run.return_value = Mock(
+        stdout="SECRET='decrypted value'\nTOKEN=abc123\n",
+        returncode=0,
+    )
+
+    env = stack_manager._load_env_file(env_file)
+
+    assert env["SECRET"] == "decrypted value"
+    assert env["TOKEN"] == "abc123"
+    mock_run.assert_called_once()
+    assert mock_run.call_args.args[0] == [
+        "sops",
+        "--decrypt",
+        "--input-type",
+        "dotenv",
+        "--output-type",
+        "dotenv",
+        str(env_file),
+    ]
 
 
 @patch('subprocess.run')
@@ -169,6 +233,26 @@ def test_deploy_stack_with_env_file(mock_run, stack_manager, stack_config, tmp_p
     mock_run.return_value = Mock(stdout="Stack deployed", returncode=0)
     result = stack_manager.deploy_stack(stack_config, [compose_file], env_file)
     assert result.status == "new"
+
+
+@patch('subprocess.run')
+def test_deploy_stack_with_sops_env_file(mock_run, stack_manager, stack_config, tmp_path):
+    """Test stack deployment with SOPS encrypted environment file"""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:latest\n")
+    env_file = tmp_path / "stack.env.sops"
+    env_file.write_text("encrypted payload")
+    mock_run.side_effect = [
+        Mock(stdout="VAR=decrypted\n", returncode=0),
+        Mock(stdout="VAR=decrypted\n", returncode=0),
+        Mock(stdout="Stack deployed", returncode=0),
+    ]
+
+    result = stack_manager.deploy_stack(stack_config, [compose_file], env_file)
+
+    assert result.status == "new"
+    deploy_call = mock_run.call_args_list[2]
+    assert deploy_call.kwargs["env"]["VAR"] == "decrypted"
 
 
 @patch('subprocess.run')

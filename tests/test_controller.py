@@ -163,6 +163,47 @@ def test_reconcile_with_changes(mock_stack_manager, mock_git_repo, config_file, 
 
 @patch('src.controller.GitRepository')
 @patch('src.controller.SwarmStackManager')
+def test_reconcile_uses_default_sops_env_file(mock_stack_manager, mock_git_repo, config_file, tmp_path):
+    """Test reconciliation uses env/<stack>.env.sops when stack env_file is omitted"""
+    hivemind = HiveMind(config_file)
+    hivemind.git_repo.clone_or_pull = Mock(return_value=True)
+
+    stacks_file = tmp_path / "stacks.yml"
+    stacks_file.write_text(
+        yaml.safe_dump(
+            {
+                "stacks": [
+                    {
+                        "name": "arr",
+                        "compose_file": "Compose-Files/Arr/sonarr.yml",
+                        "enabled": True,
+                    }
+                ]
+            }
+        )
+    )
+    compose_file = tmp_path / "Compose-Files" / "Arr" / "sonarr.yml"
+    compose_file.parent.mkdir(parents=True)
+    compose_file.write_text("services:\n  sonarr:\n    image: lscr.io/linuxserver/sonarr:latest\n")
+    sops_env = tmp_path / "env" / "arr.env.sops"
+    sops_env.parent.mkdir()
+    sops_env.write_text("encrypted payload")
+
+    def resolve(path):
+        return tmp_path / path
+
+    hivemind.git_repo.get_file_path = Mock(side_effect=resolve)
+    hivemind.stack_manager.list_stacks = Mock(return_value=[])
+    hivemind.stack_manager.deploy_stack = Mock(return_value=DeployResult(status="updated"))
+
+    hivemind.reconcile()
+
+    hivemind.stack_manager.deploy_stack.assert_called_once()
+    assert hivemind.stack_manager.deploy_stack.call_args.args[2] == sops_env
+
+
+@patch('src.controller.GitRepository')
+@patch('src.controller.SwarmStackManager')
 def test_reconcile_removes_disabled_stacks(mock_stack_manager, mock_git_repo, config_file, stacks_config, tmp_path):
     """Test that reconciliation removes disabled stacks"""
     hivemind = HiveMind(config_file)
@@ -214,7 +255,14 @@ def test_reconcile_removes_replaced_and_retired_stacks(mock_stack_manager, mock_
     compose_file_2 = tmp_path / "stack2.yml"
     compose_file_2.write_text("services:\n  two:\n    image: busybox\n")
 
-    hivemind.git_repo.get_file_path = Mock(side_effect=[stacks_file, compose_file_1, compose_file_2])
+    def resolve(path):
+        return {
+            "stacks.yml": stacks_file,
+            "stack1.yml": compose_file_1,
+            "stack2.yml": compose_file_2,
+        }.get(path, tmp_path / path)
+
+    hivemind.git_repo.get_file_path = Mock(side_effect=resolve)
     hivemind.stack_manager.list_stacks = Mock(
         return_value=["grouped-stack", "old-stack-1", "old-stack-2", "old-retired"]
     )
@@ -255,7 +303,13 @@ def test_reconcile_keeps_replaced_stack_when_deploy_fails(mock_stack_manager, mo
     compose_file = tmp_path / "stack.yml"
     compose_file.write_text("services:\n  one:\n    image: busybox\n")
 
-    hivemind.git_repo.get_file_path = Mock(side_effect=[stacks_file, compose_file])
+    def resolve(path):
+        return {
+            "stacks.yml": stacks_file,
+            "stack.yml": compose_file,
+        }.get(path, tmp_path / path)
+
+    hivemind.git_repo.get_file_path = Mock(side_effect=resolve)
     hivemind.stack_manager.list_stacks = Mock(return_value=["grouped-stack", "old-stack"])
     hivemind.stack_manager.deploy_stack = Mock(return_value=DeployResult(status="failed"))
     hivemind.stack_manager.remove_stack = Mock(return_value=True)
@@ -274,7 +328,7 @@ def test_bootstrap(mock_stack_manager, mock_git_repo, config_file):
     hivemind.git_repo.clone_or_pull = Mock(return_value=True)
     hivemind.git_repo.get_file_path = Mock(return_value=Path("/nonexistent/stacks.yml"))
     hivemind.bootstrap()
-    hivemind.git_repo.clone_or_pull.assert_called_once()
+    assert hivemind.git_repo.clone_or_pull.call_count == 2
 
 
 @patch('src.controller.GitRepository')
@@ -291,7 +345,7 @@ def test_run_loop(mock_sleep, mock_stack_manager, mock_git_repo, config_file):
     hivemind.run()
     
     assert hivemind.running is False
-    assert mock_sleep.call_count == 1
+    assert mock_sleep.call_count == 2
 
 
 @patch('src.controller.GitRepository')

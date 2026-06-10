@@ -1,8 +1,19 @@
 FROM python:3.11-slim@sha256:9a7765b36773a37061455b332f18e265e7f58f6fea9c419a550d2a8b0e9db834
 
-# Install git and docker CLI
+ARG SOPS_VERSION=3.11.0
+ARG TARGETARCH
+
+# Install git, sops, age, and docker CLI
 RUN apt-get update && \
-    apt-get install -y git curl && \
+    apt-get install -y git curl age ca-certificates && \
+    arch="${TARGETARCH:-amd64}" && \
+    case "$arch" in \
+      amd64) sops_arch=amd64 ;; \
+      arm64) sops_arch=arm64 ;; \
+      *) echo "Unsupported architecture for sops: $arch" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.${sops_arch}" -o /usr/local/bin/sops && \
+    chmod 0755 /usr/local/bin/sops && \
     curl -fsSL https://get.docker.com -o get-docker.sh && \
     sh get-docker.sh && \
     rm get-docker.sh && \
@@ -21,6 +32,8 @@ COPY src/ /app/src/
 
 # Create config directory
 RUN mkdir -p /app/config
+
+EXPOSE 8080
 
 # Run HiveMind
 ENTRYPOINT ["python3", "-m", "src.main"]
