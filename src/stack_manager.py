@@ -5,6 +5,7 @@ import subprocess
 import hashlib
 import logging
 import yaml
+import codecs
 from pathlib import Path
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
@@ -195,7 +196,8 @@ class SwarmStackManager:
                 logger.debug(f"Compose file hash added to stack hash: {compose_path}")
             
             if env_file and env_file.exists():
-                env_hash = self._calculate_file_hash(env_file)
+                env_content = self._read_env_content(env_file)
+                env_hash = hashlib.sha256(env_content.encode("utf-8")).hexdigest()
                 sha256_hash.update(env_hash.encode("utf-8"))
                 logger.debug("Environment file hash added to stack hash")
             elif env_file:
@@ -214,31 +216,82 @@ class SwarmStackManager:
         try:
             env = dict(**os.environ)
             logger.debug(f"Starting with {len(env)} system environment variables")
+            env_content = self._read_env_content(env_file)
             
             loaded_vars = 0
-            with open(env_file, "r") as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
-                        logger.debug(f"Line {line_num}: empty, skipping")
-                        continue
-                    if line.startswith("#"):
-                        logger.debug(f"Line {line_num}: comment, skipping")
-                        continue
-                    if "=" not in line:
-                        logger.warning(f"Line {line_num}: invalid format (no '='), skipping: {line}")
-                        continue
-                    
-                    key, value = line.split("=", 1)
-                    env[key] = value
-                    loaded_vars += 1
-                    logger.debug(f"Line {line_num}: loaded variable '{key}'")
+            for line_num, line in enumerate(env_content.splitlines(), 1):
+                parsed = self._parse_env_line(line, line_num)
+                if parsed is None:
+                    continue
+
+                key, value = parsed
+                env[key] = value
+                loaded_vars += 1
+                logger.debug(f"Line {line_num}: loaded variable '{key}'")
             
             logger.info(f"Loaded {loaded_vars} environment variable(s) from {env_file}")
             return env
         except Exception as e:
             logger.error(f"Failed to load environment file {env_file}: {e}", exc_info=True)
             raise
+
+    def _read_env_content(self, env_file: Path) -> str:
+        """Read plaintext or SOPS-encrypted dotenv content."""
+        if self._is_sops_env_file(env_file):
+            logger.info("Decrypting SOPS environment file: %s", env_file)
+            result = subprocess.run(
+                [
+                    "sops",
+                    "--decrypt",
+                    "--input-type",
+                    "dotenv",
+                    "--output-type",
+                    "dotenv",
+                    str(env_file),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return result.stdout
+
+        with open(env_file, "r") as f:
+            return f.read()
+
+    def _is_sops_env_file(self, env_file: Path) -> bool:
+        """Return true when an env file should be decrypted with SOPS."""
+        return env_file.name.endswith(".sops") or ".sops." in env_file.name
+
+    def _parse_env_line(self, line: str, line_num: int) -> Optional[tuple[str, str]]:
+        """Parse one Docker-compatible dotenv line."""
+        line = line.strip()
+        if not line:
+            logger.debug(f"Line {line_num}: empty, skipping")
+            return None
+        if line.startswith("#"):
+            logger.debug(f"Line {line_num}: comment, skipping")
+            return None
+        if "=" not in line:
+            logger.warning(f"Line {line_num}: invalid format (no '='), skipping: {line}")
+            return None
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            logger.warning(f"Line {line_num}: invalid format (empty key), skipping")
+            return None
+
+        return key, self._parse_env_value(value.strip())
+
+    def _parse_env_value(self, value: str) -> str:
+        """Parse dotenv value quoting emitted by SOPS and accepted by Docker Compose."""
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            quote = value[0]
+            value = value[1:-1]
+            if quote == '"':
+                return codecs.decode(value, "unicode_escape")
+            return value
+        return value
 
     def _extract_service_images(self, compose_paths: List[Path]) -> Dict[str, str]:
         """Extract final image values for services across compose files."""
