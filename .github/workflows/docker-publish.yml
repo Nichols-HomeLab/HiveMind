@@ -6,6 +6,9 @@ on:
       - main
     paths:
       - 'src/**'
+      - 'Dockerfile'
+      - 'requirements.txt'
+      - '.github/workflows/docker-publish.yml'
     tags:
       - 'v*.*.*'
   workflow_dispatch:
@@ -16,8 +19,8 @@ on:
         type: string
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  REGISTRY: git.nicholstech.org
+  IMAGE_NAME: nichols-homelab/hivemind
 
 jobs:
   build-and-push:
@@ -30,7 +33,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to Gitea Container Registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
