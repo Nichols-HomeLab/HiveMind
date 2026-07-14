@@ -1,13 +1,16 @@
 """Tests for stack_manager module"""
 
+import base64
+import json
 import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch, mock_open
 from src.stack_manager import (
     DeployResult,
     PersistedStackState,
-    SERVICE_IMAGE_LABEL,
     STACK_HASH_LABEL,
+    STATE_LABEL,
+    STATE_STACK_LABEL,
     SwarmStackManager,
     StackConfig,
 )
@@ -256,12 +259,18 @@ def test_deploy_stack_with_sops_env_file(mock_run, stack_manager, stack_config, 
         Mock(stdout="", returncode=0),
         Mock(stdout="services:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:latest\n", returncode=0),
         Mock(stdout="Stack deployed", returncode=0),
+        Mock(stdout="", returncode=0),
+        Mock(stdout="state-id\n", returncode=0),
     ]
 
     result = stack_manager.deploy_stack(stack_config, [compose_file], env_file)
 
     assert result.status == "new"
-    deploy_call = mock_run.call_args_list[-1]
+    deploy_call = next(
+        call
+        for call in mock_run.call_args_list
+        if call.args[0][:3] == ["docker", "stack", "deploy"]
+    )
     assert deploy_call.kwargs["env"]["VAR"] == "decrypted"
     assert deploy_call.args[0][:4] == ["docker", "stack", "deploy", "--compose-file"]
 
@@ -340,46 +349,30 @@ def test_normalize_compose_data_removes_swarm_unsupported_fields(stack_manager):
     assert service["configs"][0]["mode"] == 292
 
 
-def test_stamp_compose_state_preserves_labels_and_records_image(stack_manager):
-    data = {
-        "services": {
-            "app": {
-                "image": "example/app:1.0",
-                "deploy": {"labels": {"existing": "value"}},
-            }
-        }
-    }
-
-    stack_manager._stamp_compose_state(data, "hash123")
-
-    labels = data["services"]["app"]["deploy"]["labels"]
-    assert labels == {
-        "existing": "value",
-        STACK_HASH_LABEL: "hash123",
-        SERVICE_IMAGE_LABEL: "example/app:1.0",
-    }
-
-
 @patch("subprocess.run")
 def test_discover_persisted_stack_state(mock_run, stack_manager):
-    specs = [
-        {
-            "Labels": {
-                STACK_HASH_LABEL: "hash123",
-                SERVICE_IMAGE_LABEL: "example/web:1.0",
+    payload = base64.b64encode(
+        json.dumps(
+            {
+                "version": 1,
+                "service_images": {
+                    "web": "example/web:1.0",
+                    "worker": "example/worker:1.0",
+                },
             }
-        },
+        ).encode()
+    ).decode()
+    configs = [
         {
-            "Labels": {
-                STACK_HASH_LABEL: "hash123",
-                SERVICE_IMAGE_LABEL: "example/worker:1.0",
-            }
-        },
+            "CreatedAt": "2026-07-14T19:00:00Z",
+            "Spec": {"Labels": {STACK_HASH_LABEL: "hash123"}, "Data": payload},
+        }
     ]
     mock_run.side_effect = [
         Mock(stdout="demo\n", returncode=0),
         Mock(stdout="demo_web\ndemo_worker\n", returncode=0),
-        Mock(stdout="\n".join(__import__("json").dumps(spec) for spec in specs), returncode=0),
+        Mock(stdout="hivemind-state-demo\n", returncode=0),
+        Mock(stdout=json.dumps(configs), returncode=0),
     ]
 
     state = stack_manager._discover_persisted_stack_state("demo")
@@ -426,25 +419,24 @@ def test_deploy_fails_closed_when_state_discovery_fails(
 
 
 @patch("subprocess.run")
-def test_persist_stack_state_only_updates_service_labels(mock_run, stack_manager):
+def test_persist_stack_state_uses_swarm_config_without_service_update(mock_run, stack_manager):
     mock_run.return_value = Mock(stdout="", returncode=0)
 
     result = stack_manager._persist_stack_state(
         "demo",
-        ["demo_web"],
         "hash123",
         {"web": "example/web:1.0"},
     )
 
     assert result is True
-    assert mock_run.call_args.args[0] == [
+    commands = [call.args[0] for call in mock_run.call_args_list]
+    assert commands[0][:3] == ["docker", "config", "ls"]
+    assert commands[1][:3] == [
         "docker",
-        "service",
-        "update",
-        "--detach=true",
-        "--label-add",
-        f"{STACK_HASH_LABEL}=hash123",
-        "--label-add",
-        f"{SERVICE_IMAGE_LABEL}=example/web:1.0",
-        "demo_web",
+        "config",
+        "create",
     ]
+    assert f"{STATE_LABEL}=true" in commands[1]
+    assert f"{STATE_STACK_LABEL}=demo" in commands[1]
+    assert f"{STACK_HASH_LABEL}=hash123" in commands[1]
+    assert all(command[:2] != ["docker", "service"] for command in commands)
