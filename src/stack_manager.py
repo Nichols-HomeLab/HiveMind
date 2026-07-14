@@ -3,6 +3,7 @@
 import os
 import subprocess
 import hashlib
+import json
 import logging
 import yaml
 import codecs
@@ -12,6 +13,9 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("hivemind.stack")
+
+STACK_HASH_LABEL = "io.nicholstech.hivemind.stack-hash"
+SERVICE_IMAGE_LABEL = "io.nicholstech.hivemind.service-image"
 
 
 @dataclass
@@ -35,6 +39,17 @@ class DeployResult:
     @property
     def changed(self) -> bool:
         return self.status in {"new", "updated"}
+
+
+@dataclass(frozen=True)
+class PersistedStackState:
+    """Deployment state reconstructed from Docker Swarm service labels."""
+
+    status: str
+    service_names: List[str] = field(default_factory=list)
+    stack_hash: Optional[str] = None
+    service_images: Dict[str, str] = field(default_factory=dict)
+    detail: Optional[str] = None
 
 
 class SwarmStackManager:
@@ -65,6 +80,42 @@ class SwarmStackManager:
             status = "new"
             image_changes: List[str] = []
 
+            if stack.name not in self.deployed_stacks:
+                persisted = self._discover_persisted_stack_state(stack.name)
+                if persisted.status == "tracked":
+                    self.deployed_stacks[stack.name] = persisted.stack_hash or ""
+                    self.deployed_service_images[stack.name] = persisted.service_images
+                    logger.info(
+                        "Restored deployment state for stack %s from Swarm labels",
+                        stack.name,
+                    )
+                elif persisted.status == "untracked":
+                    logger.warning(
+                        "Adopting existing unlabeled stack %s without redeploying it",
+                        stack.name,
+                    )
+                    if not self._persist_stack_state(
+                        stack.name,
+                        persisted.service_names,
+                        compose_hash,
+                        service_images,
+                    ):
+                        return DeployResult(
+                            status="failed",
+                            detail=f"Failed to persist deployment state for existing stack {stack.name}",
+                        )
+                    self.deployed_stacks[stack.name] = compose_hash
+                    self.deployed_service_images[stack.name] = service_images
+                    return DeployResult(status="unchanged", detail="adopted existing stack")
+                elif persisted.status in {"error", "inconsistent"}:
+                    logger.error(
+                        "Refusing to deploy stack %s because persisted state is %s: %s",
+                        stack.name,
+                        persisted.status,
+                        persisted.detail,
+                    )
+                    return DeployResult(status="failed", detail=persisted.detail)
+
             if stack.name in self.deployed_stacks:
                 previous_hash = self.deployed_stacks[stack.name]
                 previous_images = self.deployed_service_images.get(stack.name, {})
@@ -94,7 +145,12 @@ class SwarmStackManager:
                 logger.warning(f"Environment file specified but not found: {env_file}")
 
             try:
-                rendered_compose = self._render_compose_file(stack.name, compose_paths, env)
+                rendered_compose = self._render_compose_file(
+                    stack.name,
+                    compose_paths,
+                    env,
+                    compose_hash,
+                )
                 cmd = ["docker", "stack", "deploy", "--compose-file", str(rendered_compose), stack.name]
                 logger.debug(f"Executing docker command: docker stack deploy ... {stack.name}")
 
@@ -302,6 +358,7 @@ class SwarmStackManager:
         stack_name: str,
         compose_paths: List[Path],
         env: Optional[dict],
+        stack_hash: Optional[str] = None,
     ) -> Path:
         """Render Compose interpolation and normalize output for Swarm."""
         cmd = ["docker", "compose"]
@@ -324,6 +381,8 @@ class SwarmStackManager:
         )
 
         rendered = self._normalize_compose_data(yaml.safe_load(result.stdout) or {})
+        if stack_hash:
+            self._stamp_compose_state(rendered, stack_hash)
 
         handle = tempfile.NamedTemporaryFile(
             mode="w",
@@ -334,6 +393,169 @@ class SwarmStackManager:
         with handle:
             yaml.safe_dump(rendered, handle, sort_keys=False)
         return Path(handle.name)
+
+    def _stamp_compose_state(self, data: dict, stack_hash: str) -> None:
+        """Add restart-safe reconciliation state to each rendered Swarm service."""
+        services = data.get("services") or {}
+        if not isinstance(services, dict):
+            return
+
+        for service in services.values():
+            if not isinstance(service, dict):
+                continue
+            deploy = service.setdefault("deploy", {})
+            labels = deploy.get("labels") or {}
+            if isinstance(labels, list):
+                labels = dict(label.split("=", 1) for label in labels if "=" in label)
+            elif not isinstance(labels, dict):
+                labels = {}
+            labels[STACK_HASH_LABEL] = stack_hash
+            image = service.get("image")
+            if isinstance(image, str) and image:
+                labels[SERVICE_IMAGE_LABEL] = image
+            deploy["labels"] = labels
+
+    def _discover_persisted_stack_state(self, stack_name: str) -> PersistedStackState:
+        """Read a stack's reconciliation state from its Swarm service specs."""
+        try:
+            stacks_result = subprocess.run(
+                ["docker", "stack", "ls", "--format", "{{.Name}}"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            stacks = {line.strip() for line in stacks_result.stdout.splitlines() if line.strip()}
+            if stack_name not in stacks:
+                return PersistedStackState(status="absent")
+
+            services_result = subprocess.run(
+                ["docker", "stack", "services", stack_name, "--format", "{{.Name}}"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            service_names = [
+                line.strip() for line in services_result.stdout.splitlines() if line.strip()
+            ]
+            if not service_names:
+                return PersistedStackState(
+                    status="error",
+                    detail=f"Existing stack {stack_name} has no discoverable services",
+                )
+
+            inspect_result = subprocess.run(
+                [
+                    "docker",
+                    "service",
+                    "inspect",
+                    "--format",
+                    "{{json .Spec}}",
+                    *service_names,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            specs = [json.loads(line) for line in inspect_result.stdout.splitlines() if line]
+            if len(specs) != len(service_names):
+                return PersistedStackState(
+                    status="error",
+                    service_names=service_names,
+                    detail=(
+                        f"Expected {len(service_names)} service specs for {stack_name}, "
+                        f"received {len(specs)}"
+                    ),
+                )
+
+            hashes = set()
+            unlabeled = []
+            images: Dict[str, str] = {}
+            prefix = f"{stack_name}_"
+            for service_name, spec in zip(service_names, specs):
+                labels = spec.get("Labels") or {}
+                stack_hash = labels.get(STACK_HASH_LABEL)
+                if stack_hash:
+                    hashes.add(stack_hash)
+                else:
+                    unlabeled.append(service_name)
+                short_name = service_name[len(prefix):] if service_name.startswith(prefix) else service_name
+                image = labels.get(SERVICE_IMAGE_LABEL)
+                if not image:
+                    image = (
+                        spec.get("TaskTemplate", {})
+                        .get("ContainerSpec", {})
+                        .get("Image")
+                    )
+                if image:
+                    images[short_name] = image
+
+            if not hashes and len(unlabeled) == len(service_names):
+                return PersistedStackState(
+                    status="untracked",
+                    service_names=service_names,
+                    service_images=images,
+                )
+            if len(hashes) != 1 or unlabeled:
+                return PersistedStackState(
+                    status="inconsistent",
+                    service_names=service_names,
+                    service_images=images,
+                    detail=(
+                        f"Stack {stack_name} has inconsistent state labels "
+                        f"(hashes={sorted(hashes)}, unlabeled={unlabeled})"
+                    ),
+                )
+            return PersistedStackState(
+                status="tracked",
+                service_names=service_names,
+                stack_hash=hashes.pop(),
+                service_images=images,
+            )
+        except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+            logger.error("Failed to discover persisted state for stack %s: %s", stack_name, exc)
+            return PersistedStackState(status="error", detail=str(exc))
+        except Exception as exc:
+            logger.error(
+                "Unexpected error discovering persisted state for stack %s: %s",
+                stack_name,
+                exc,
+                exc_info=True,
+            )
+            return PersistedStackState(status="error", detail=str(exc))
+
+    def _persist_stack_state(
+        self,
+        stack_name: str,
+        service_names: List[str],
+        stack_hash: str,
+        service_images: Dict[str, str],
+    ) -> bool:
+        """Label an existing stack without changing any service task templates."""
+        prefix = f"{stack_name}_"
+        try:
+            for service_name in service_names:
+                short_name = service_name[len(prefix):] if service_name.startswith(prefix) else service_name
+                cmd = [
+                    "docker",
+                    "service",
+                    "update",
+                    "--detach=true",
+                    "--label-add",
+                    f"{STACK_HASH_LABEL}={stack_hash}",
+                ]
+                image = service_images.get(short_name)
+                if image:
+                    cmd.extend(["--label-add", f"{SERVICE_IMAGE_LABEL}={image}"])
+                cmd.append(service_name)
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+            return True
+        except subprocess.CalledProcessError as exc:
+            logger.error(
+                "Failed to persist deployment state for stack %s: %s",
+                stack_name,
+                exc.stderr or exc,
+            )
+            return False
 
     def _normalize_compose_data(self, data: dict) -> dict:
         """Remove or coerce fields emitted by Compose that Swarm rejects."""

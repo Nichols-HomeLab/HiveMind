@@ -3,7 +3,14 @@
 import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch, mock_open
-from src.stack_manager import DeployResult, SwarmStackManager, StackConfig
+from src.stack_manager import (
+    DeployResult,
+    PersistedStackState,
+    SERVICE_IMAGE_LABEL,
+    STACK_HASH_LABEL,
+    SwarmStackManager,
+    StackConfig,
+)
 
 
 @pytest.fixture
@@ -244,6 +251,7 @@ def test_deploy_stack_with_sops_env_file(mock_run, stack_manager, stack_config, 
     env_file.write_text("encrypted payload")
     mock_run.side_effect = [
         Mock(stdout="VAR=decrypted\n", returncode=0),
+        Mock(stdout="", returncode=0),
         Mock(stdout="VAR=decrypted\n", returncode=0),
         Mock(stdout="", returncode=0),
         Mock(stdout="services:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:latest\n", returncode=0),
@@ -330,3 +338,113 @@ def test_normalize_compose_data_removes_swarm_unsupported_fields(stack_manager):
     assert service["ports"] == [{"target": 8080, "published": 80}]
     assert service["secrets"][0]["mode"] == 0o440
     assert service["configs"][0]["mode"] == 292
+
+
+def test_stamp_compose_state_preserves_labels_and_records_image(stack_manager):
+    data = {
+        "services": {
+            "app": {
+                "image": "example/app:1.0",
+                "deploy": {"labels": {"existing": "value"}},
+            }
+        }
+    }
+
+    stack_manager._stamp_compose_state(data, "hash123")
+
+    labels = data["services"]["app"]["deploy"]["labels"]
+    assert labels == {
+        "existing": "value",
+        STACK_HASH_LABEL: "hash123",
+        SERVICE_IMAGE_LABEL: "example/app:1.0",
+    }
+
+
+@patch("subprocess.run")
+def test_discover_persisted_stack_state(mock_run, stack_manager):
+    specs = [
+        {
+            "Labels": {
+                STACK_HASH_LABEL: "hash123",
+                SERVICE_IMAGE_LABEL: "example/web:1.0",
+            }
+        },
+        {
+            "Labels": {
+                STACK_HASH_LABEL: "hash123",
+                SERVICE_IMAGE_LABEL: "example/worker:1.0",
+            }
+        },
+    ]
+    mock_run.side_effect = [
+        Mock(stdout="demo\n", returncode=0),
+        Mock(stdout="demo_web\ndemo_worker\n", returncode=0),
+        Mock(stdout="\n".join(__import__("json").dumps(spec) for spec in specs), returncode=0),
+    ]
+
+    state = stack_manager._discover_persisted_stack_state("demo")
+
+    assert state.status == "tracked"
+    assert state.stack_hash == "hash123"
+    assert state.service_images == {
+        "web": "example/web:1.0",
+        "worker": "example/worker:1.0",
+    }
+
+
+@patch("subprocess.run")
+def test_deploy_adopts_untracked_stack_without_redeploy(
+    mock_run, stack_manager, stack_config, tmp_path
+):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  app:\n    image: example/app:1.0\n")
+    state = PersistedStackState(status="untracked", service_names=["test-stack_app"])
+
+    with patch.object(stack_manager, "_discover_persisted_stack_state", return_value=state), patch.object(
+        stack_manager, "_persist_stack_state", return_value=True
+    ) as persist:
+        result = stack_manager.deploy_stack(stack_config, [compose_file])
+
+    assert result == DeployResult(status="unchanged", detail="adopted existing stack")
+    persist.assert_called_once()
+    mock_run.assert_not_called()
+
+
+@patch("subprocess.run")
+def test_deploy_fails_closed_when_state_discovery_fails(
+    mock_run, stack_manager, stack_config, tmp_path
+):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  app:\n    image: example/app:1.0\n")
+    state = PersistedStackState(status="error", detail="Docker API unavailable")
+
+    with patch.object(stack_manager, "_discover_persisted_stack_state", return_value=state):
+        result = stack_manager.deploy_stack(stack_config, [compose_file])
+
+    assert result == DeployResult(status="failed", detail="Docker API unavailable")
+    mock_run.assert_not_called()
+
+
+@patch("subprocess.run")
+def test_persist_stack_state_only_updates_service_labels(mock_run, stack_manager):
+    mock_run.return_value = Mock(stdout="", returncode=0)
+
+    result = stack_manager._persist_stack_state(
+        "demo",
+        ["demo_web"],
+        "hash123",
+        {"web": "example/web:1.0"},
+    )
+
+    assert result is True
+    assert mock_run.call_args.args[0] == [
+        "docker",
+        "service",
+        "update",
+        "--detach=true",
+        "--label-add",
+        f"{STACK_HASH_LABEL}=hash123",
+        "--label-add",
+        f"{SERVICE_IMAGE_LABEL}=example/web:1.0",
+        "demo_web",
+    ]
