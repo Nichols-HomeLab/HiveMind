@@ -45,8 +45,9 @@ jobs:
 
       - name: Log in to Gitea Container Registry
         env:
-          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$REGISTRY_TOKEN" | docker login "$REGISTRY" --username "${{ github.actor }}" --password-stdin
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          REGISTRY_USERNAME: renovate
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
