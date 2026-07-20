@@ -46,7 +46,7 @@ jobs:
       - name: Log in to Gitea Container Registry
         env:
           REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
-          REGISTRY_USERNAME: renovate
+          REGISTRY_USERNAME: admin
         run: printf '%s' "$REGISTRY_TOKEN" | docker login "$REGISTRY" --username "$REGISTRY_USERNAME" --password-stdin
 
       - name: Extract metadata (tags, labels) for Docker
