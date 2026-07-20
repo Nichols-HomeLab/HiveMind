@@ -17,21 +17,21 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Checkout from repository host
+        env:
+          REPOSITORY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          auth="$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64 -w0)"
+          git init .
+          git remote add origin "$REPOSITORY_URL"
+          git -c "http.extraHeader=AUTHORIZATION: basic $auth" fetch --depth=1 origin "$COMMIT_SHA"
+          unset auth
+          git checkout --detach FETCH_HEAD
 
       - name: Build Docker image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          context: .
-          push: false
-          load: true
-          tags: hivemind:test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        run: docker build --tag hivemind:test .
 
       - name: Test Docker image
         run: |

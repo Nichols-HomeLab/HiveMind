@@ -30,34 +30,57 @@ jobs:
       packages: write
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout from repository host
+        env:
+          REPOSITORY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          auth="$(printf 'x-access-token:%s' "$REPOSITORY_TOKEN" | base64 -w0)"
+          git init .
+          git remote add origin "$REPOSITORY_URL"
+          git -c "http.extraHeader=AUTHORIZATION: basic $auth" fetch --depth=1 origin "$COMMIT_SHA"
+          unset auth
+          git checkout --detach FETCH_HEAD
 
       - name: Log in to Gitea Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$REGISTRY_TOKEN" | docker login "$REGISTRY" --username "${{ github.actor }}" --password-stdin
 
       - name: Extract metadata (tags, labels) for Docker
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=sha,prefix={{branch}}-
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ inputs.version }},enable=${{ inputs.version != '' }}
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          image="$REGISTRY/$IMAGE_NAME"
+          ref_name="${GITHUB_REF_NAME//\//-}"
+          tags=("$image:$ref_name" "$image:$ref_name-${GITHUB_SHA:0:7}")
+          if [ "$GITHUB_REF_NAME" = main ]; then
+            tags+=("$image:latest")
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tags+=("$image:${GITHUB_REF_NAME#v}")
+          fi
+          if [ -n "$INPUT_VERSION" ]; then
+            tags+=("$image:$INPUT_VERSION")
+          fi
+          {
+            echo 'tags<<EOF'
+            printf '%s\n' "${tags[@]}"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          mapfile -t tags <<< "$IMAGE_TAGS"
+          build_args=()
+          for tag in "${tags[@]}"; do
+            build_args+=(--tag "$tag")
+          done
+          docker build "${build_args[@]}" .
+          for tag in "${tags[@]}"; do
+            docker push "$tag"
+          done
