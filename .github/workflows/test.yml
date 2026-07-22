@@ -17,6 +17,12 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     steps:
+      - name: Route Gitea through Swarm ingress
+        run: |
+          traefik_ip="$(getent ahostsv4 reverse-proxy_traefik | awk 'NR == 1 { print $1 }')"
+          test -n "$traefik_ip"
+          printf '%s %s\n' "$traefik_ip" git.nicholstech.org >> /etc/hosts
+
       - name: Checkout from repository host
         env:
           REPOSITORY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
