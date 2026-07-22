@@ -678,6 +678,15 @@ class SwarmStackManager:
                     mode = mount.get("mode")
                     if isinstance(mode, str) and mode.isdigit():
                         mount["mode"] = int(mode, 8 if mode.startswith("0") else 10)
+                for mount in service.get("volumes", []) or []:
+                    if not isinstance(mount, dict) or mount.get("type") != "tmpfs":
+                        continue
+                    tmpfs = mount.get("tmpfs")
+                    if not isinstance(tmpfs, dict):
+                        continue
+                    size = tmpfs.get("size")
+                    if isinstance(size, str) and size.isdigit():
+                        tmpfs["size"] = int(size)
 
         return data
 

@@ -334,6 +334,13 @@ def test_normalize_compose_data_removes_swarm_unsupported_fields(stack_manager):
                 "ports": [{"target": "8080", "published": "80"}],
                 "secrets": [{"source": "secret", "target": "/secret", "mode": "0440"}],
                 "configs": [{"source": "config", "target": "/config", "mode": "292"}],
+                "volumes": [
+                    {
+                        "type": "tmpfs",
+                        "target": "/dev/shm",
+                        "tmpfs": {"size": "1073741824"},
+                    }
+                ],
             }
         },
     }
@@ -347,6 +354,7 @@ def test_normalize_compose_data_removes_swarm_unsupported_fields(stack_manager):
     assert service["ports"] == [{"target": 8080, "published": 80}]
     assert service["secrets"][0]["mode"] == 0o440
     assert service["configs"][0]["mode"] == 292
+    assert service["volumes"][0]["tmpfs"]["size"] == 1073741824
 
 
 @patch("subprocess.run")
