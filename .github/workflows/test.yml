@@ -19,7 +19,12 @@ jobs:
     steps:
       - name: Route Gitea through Swarm ingress
         run: |
-          traefik_ip="$(getent ahostsv4 reverse-proxy_traefik | awk 'NR == 1 { print $1 }')"
+          traefik_ip=""
+          for attempt in {1..10}; do
+            traefik_ip="$(getent ahostsv4 reverse-proxy_traefik 2>/dev/null | awk 'NR == 1 { print $1 }' || true)"
+            [ -n "$traefik_ip" ] && break
+            sleep 2
+          done
           test -n "$traefik_ip"
           printf '%s %s\n' "$traefik_ip" git.nicholstech.org >> /etc/hosts
 
