@@ -38,7 +38,7 @@ jobs:
             [ -n "$traefik_ip" ] && break
             sleep 2
           done
-          test -n "$traefik_ip"
+          traefik_ip="${traefik_ip:-10.0.30.40}"
           printf '%s %s\n' "$traefik_ip" git.nicholstech.org >> /etc/hosts
 
       - name: Checkout from repository host
