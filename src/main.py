@@ -86,6 +86,18 @@ def _write_temp_config(config: dict) -> str:
         raise
 
 
+def _load_webhook_secret() -> str:
+    """Load the webhook secret from a Docker secret file or environment variable."""
+    secret_file = strip_quotes(os.environ.get("HIVEMIND_WEBHOOK_SECRET_FILE"))
+    if secret_file:
+        try:
+            return Path(secret_file).read_text().strip()
+        except OSError as exc:
+            logger.error("Failed to read webhook secret file %s: %s", secret_file, exc)
+            return ""
+    return strip_quotes(os.environ.get("HIVEMIND_WEBHOOK_SECRET", "")).strip()
+
+
 def main():
     """Main entry point"""
     logger.info("Starting HiveMind application")
@@ -111,14 +123,6 @@ def main():
     else:
         logger.info(f"Using configuration file: {config_path}")
     
-    webui_enabled = os.environ.get("HIVEMIND_WEBUI_ENABLED", "true").lower() not in ("false", "0", "no")
-    webui_port = int(os.environ.get("HIVEMIND_WEBUI_PORT", "8080"))
-    if webui_enabled:
-        try:
-            start_webui(port=webui_port)
-        except Exception as e:
-            logger.warning("Failed to start Web UI: %s", e)
-
     try:
         logger.debug("Initializing HiveMind controller")
         hivemind = HiveMind(config_path)
@@ -126,6 +130,19 @@ def main():
     except Exception as e:
         logger.error(f"Failed to initialize HiveMind: {e}", exc_info=True)
         sys.exit(1)
+
+    webui_enabled = os.environ.get("HIVEMIND_WEBUI_ENABLED", "true").lower() not in ("false", "0", "no")
+    webui_port = int(os.environ.get("HIVEMIND_WEBUI_PORT", "8080"))
+    if webui_enabled:
+        try:
+            start_webui(
+                port=webui_port,
+                reconcile_trigger=hivemind.trigger_reconcile,
+                webhook_secret=_load_webhook_secret(),
+                webhook_branch=hivemind.config["git"].get("branch", "main"),
+            )
+        except Exception as e:
+            logger.warning("Failed to start Web UI: %s", e)
     
     if len(sys.argv) > 2 and sys.argv[2] == "bootstrap":
         logger.info("Running in bootstrap mode")

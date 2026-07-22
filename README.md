@@ -69,9 +69,34 @@ When using Docker Compose or running the container directly, configure HiveMind 
 | `HIVEMIND_GIT_URL` | **Yes** | - | Git repository URL (HTTPS) |
 | `HIVEMIND_GIT_BRANCH` | No | `main` | Git branch to monitor |
 | `HIVEMIND_GIT_PATH` | No | `.` | Path within repo where stacks.yml is located |
-| `HIVEMIND_GIT_POLL_INTERVAL` | No | `60` | Seconds between Git polls |
+| `HIVEMIND_GIT_POLL_INTERVAL` | No | `60` | Fallback seconds between Git polls; overrides YAML when set |
 | `HIVEMIND_GIT_USERNAME` | No | - | Username for private repos (HTTPS) |
 | `HIVEMIND_GIT_PASSWORD` | No | - | Password/token for private repos (HTTPS) |
+| `HIVEMIND_WEBHOOK_SECRET` | No | - | Shared HMAC secret for GitHub/Gitea push webhooks |
+| `HIVEMIND_WEBHOOK_SECRET_FILE` | No | - | File containing the webhook secret; preferred over the environment variable |
+
+### GitHub and Gitea webhooks
+
+Configure either provider to send push events to:
+
+```text
+https://your-hivemind-host/api/webhooks/git
+```
+
+Use the same high-entropy secret in the provider and HiveMind. GitHub deliveries are verified
+with `X-Hub-Signature-256`; Gitea deliveries are verified with `X-Gitea-Signature`. HiveMind
+uses a constant-time HMAC-SHA256 comparison, ignores non-push events and other branches, and
+wakes the controller for the configured Git branch. An invalid or unsigned request cannot
+trigger reconciliation.
+
+For Swarm, create the external secret expected by `hivemind-stack.yml`:
+
+```bash
+openssl rand -hex 32 | docker secret create hivemind_webhook_secret -
+```
+
+Polling remains as a recovery mechanism for missed deliveries. A longer value such as `3600`
+is recommended when webhooks are enabled.
 
 **Example `.env` file:**
 ```bash
@@ -167,10 +192,10 @@ HiveMind/
 ## How It Works
 
 1. **Initialization**: HiveMind clones your Git repository
-2. **Polling**: Every `poll_interval` seconds, it checks for new commits
+2. **Triggering**: A signed GitHub/Gitea push webhook wakes HiveMind immediately
 3. **Reconciliation**: On changes, it reads `stacks.yml` and compares with deployed stacks
 4. **Deployment**: Deploys new/updated stacks, removes disabled stacks
-5. **Repeat**: Continues monitoring for changes
+5. **Fallback**: Polling still checks for missed webhook deliveries
 
 ## Architecture
 
@@ -180,7 +205,7 @@ HiveMind/
 │  (stacks.yml)   │
 └────────┬────────┘
          │
-         │ Poll & Pull
+         │ Signed webhook / fallback poll
          ▼
 ┌─────────────────┐
 │   HiveMind      │

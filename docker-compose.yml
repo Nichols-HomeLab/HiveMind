@@ -12,7 +12,7 @@ services:
       - HIVEMIND_GIT_URL=
       - HIVEMIND_GIT_BRANCH=main
       - HIVEMIND_GIT_PATH=.
-      - HIVEMIND_GIT_POLL_INTERVAL=60
+      - HIVEMIND_GIT_POLL_INTERVAL=${HIVEMIND_GIT_POLL_INTERVAL:-3600}
       - HIVEMIND_GIT_USERNAME=
       - HIVEMIND_GIT_PASSWORD=
       - HIVEMIND_SMTP_HOST=ntfy.nicholstech.org
@@ -23,6 +23,7 @@ services:
       - HIVEMIND_SMTP_TLS=false
       - HIVEMIND_WEBUI_ENABLED=true
       - HIVEMIND_WEBUI_PORT=8080
+      - HIVEMIND_WEBHOOK_SECRET=${HIVEMIND_WEBHOOK_SECRET:-}
     restart: unless-stopped
     networks:
       - hivemind

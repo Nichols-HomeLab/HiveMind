@@ -1,9 +1,10 @@
 """HiveMind main controller"""
 
-import time
 import yaml
 import logging
 import tempfile
+import os
+import threading
 from pathlib import Path
 from typing import Dict, List
 
@@ -45,9 +46,14 @@ class HiveMind:
             self.notifier = SMTPNotifier(smtp_cfg)
 
         self.retired_stacks: List[str] = []
+        self._reconcile_event = threading.Event()
         
         self.running = False
         logger.debug("HiveMind initialization complete")
+
+    def trigger_reconcile(self) -> None:
+        """Wake the controller so it checks Git without waiting for the poll timer."""
+        self._reconcile_event.set()
     
     def _load_config(self) -> dict:
         """Load HiveMind configuration"""
@@ -258,8 +264,13 @@ class HiveMind:
         logger.info("HiveMind starting...")
         self.running = True
         
-        poll_interval = self.config['git'].get('poll_interval', 60)
-        logger.info(f"Poll interval set to {poll_interval} seconds")
+        poll_interval = int(
+            os.environ.get(
+                "HIVEMIND_GIT_POLL_INTERVAL",
+                self.config['git'].get('poll_interval', 60),
+            )
+        )
+        logger.info(f"Fallback poll interval set to {poll_interval} seconds")
         
         try:
             logger.info("Entering main reconciliation loop")
@@ -272,8 +283,9 @@ class HiveMind:
                     logger.error(f"Reconciliation error: {e}", exc_info=True)
                     logger.warning("Continuing despite reconciliation error")
                 
-                logger.info(f"Sleeping for {poll_interval} seconds")
-                time.sleep(poll_interval)
+                logger.info(f"Waiting up to {poll_interval} seconds for a webhook")
+                self._reconcile_event.wait(timeout=poll_interval)
+                self._reconcile_event.clear()
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt")
             logger.info("Shutting down HiveMind gracefully")

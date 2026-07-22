@@ -1,6 +1,9 @@
 """HiveMind Web UI — Flask dashboard for viewing and managing Docker Swarm stacks."""
+import hashlib
+import hmac
 import logging
 import threading
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +251,11 @@ _refreshTimer = setInterval(loadStacks, 30000);
 </html>"""
 
 
-def _build_app():
+def _build_app(
+    reconcile_trigger: Optional[Callable[[], None]] = None,
+    webhook_secret: Optional[str] = None,
+    webhook_branch: str = "main",
+):
     from flask import Flask, jsonify, request, render_template_string
 
     app = Flask(__name__)
@@ -360,11 +367,72 @@ def _build_app():
             logger.exception("Failed to toggle service %s", service_id)
             return jsonify({"error": str(e)}), 500
 
+    @app.route("/api/webhooks/git", methods=["POST"])
+    def api_git_webhook():
+        if not webhook_secret:
+            return jsonify({"error": "Git webhook is not configured"}), 503
+
+        body = request.get_data(cache=True)
+        expected_digest = hmac.new(
+            webhook_secret.encode("utf-8"),
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+        gitea_signature = request.headers.get("X-Gitea-Signature")
+        github_signature = request.headers.get("X-Hub-Signature-256")
+
+        if gitea_signature:
+            signature_valid = hmac.compare_digest(expected_digest, gitea_signature)
+        elif github_signature:
+            signature_valid = hmac.compare_digest(
+                f"sha256={expected_digest}",
+                github_signature,
+            )
+        else:
+            signature_valid = False
+
+        if not signature_valid:
+            return jsonify({"error": "Invalid webhook signature"}), 401
+
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Invalid JSON payload"}), 400
+
+        event = (
+            request.headers.get("X-Gitea-Event")
+            or request.headers.get("X-GitHub-Event")
+            or ""
+        ).casefold()
+        if event == "ping":
+            return jsonify({"status": "ok"})
+        if event != "push":
+            return jsonify({"status": "ignored", "reason": "not a push event"}), 202
+
+        expected_ref = f"refs/heads/{webhook_branch}"
+        if payload.get("ref") != expected_ref:
+            return jsonify({"status": "ignored", "reason": "branch does not match"}), 202
+
+        if reconcile_trigger is None:
+            return jsonify({"error": "Reconciliation trigger is unavailable"}), 503
+
+        reconcile_trigger()
+        return jsonify({"status": "accepted"}), 202
+
     return app
 
 
-def start(host: str = "0.0.0.0", port: int = 8080) -> threading.Thread:
-    app = _build_app()
+def start(
+    host: str = "0.0.0.0",
+    port: int = 8080,
+    reconcile_trigger: Optional[Callable[[], None]] = None,
+    webhook_secret: Optional[str] = None,
+    webhook_branch: str = "main",
+) -> threading.Thread:
+    app = _build_app(
+        reconcile_trigger=reconcile_trigger,
+        webhook_secret=webhook_secret,
+        webhook_branch=webhook_branch,
+    )
 
     def _run():
         app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)

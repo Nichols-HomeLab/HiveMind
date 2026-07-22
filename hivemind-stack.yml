@@ -4,9 +4,14 @@ services:
     command: ["/config/hivemind-config.yml"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      HIVEMIND_GIT_POLL_INTERVAL: "${HIVEMIND_GIT_POLL_INTERVAL:-3600}"
+      HIVEMIND_WEBHOOK_SECRET_FILE: /run/secrets/hivemind_webhook_secret
     secrets:
       - source: hivemind_config
         target: /config/hivemind-config.yml
+      - source: hivemind_webhook_secret
+        target: /run/secrets/hivemind_webhook_secret
     ports:
       - "8080:8080"
     networks:
@@ -27,3 +32,6 @@ secrets:
   hivemind_config:
     external: true
     name: hivemind_private_config
+  hivemind_webhook_secret:
+    external: true
+    name: hivemind_webhook_secret

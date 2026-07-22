@@ -5,7 +5,12 @@ import os
 import sys
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
-from src.main import _build_config_from_env, _write_temp_config, main
+from src.main import _build_config_from_env, _load_webhook_secret, _write_temp_config, main
+
+
+@pytest.fixture(autouse=True)
+def disable_webui_during_main_tests(monkeypatch):
+    monkeypatch.setenv("HIVEMIND_WEBUI_ENABLED", "false")
 
 
 def test_build_config_from_env_success():
@@ -64,6 +69,21 @@ def test_write_temp_config(tmp_path):
         assert "hivemind-config.yml" in config_path
 
 
+def test_load_webhook_secret_prefers_file(tmp_path):
+    secret_file = tmp_path / "webhook-secret"
+    secret_file.write_text("file-secret\n")
+
+    with patch.dict(
+        os.environ,
+        {
+            "HIVEMIND_WEBHOOK_SECRET_FILE": str(secret_file),
+            "HIVEMIND_WEBHOOK_SECRET": "environment-secret",
+        },
+        clear=True,
+    ):
+        assert _load_webhook_secret() == "file-secret"
+
+
 @patch('src.main.HiveMind')
 def test_main_with_config_file(mock_hivemind, tmp_path):
     """Test main function with existing config file"""
@@ -74,6 +94,29 @@ def test_main_with_config_file(mock_hivemind, tmp_path):
         main()
         mock_hivemind.assert_called_once_with(str(config_file))
         mock_hivemind.return_value.run.assert_called_once()
+
+
+@patch('src.main.start_webui')
+@patch('src.main.HiveMind')
+def test_main_connects_webhook_to_controller(
+    mock_hivemind, mock_start_webui, tmp_path, monkeypatch
+):
+    config_file = tmp_path / "config.yml"
+    config_file.write_text("git:\n  url: test\n  branch: main\n")
+    controller = mock_hivemind.return_value
+    controller.config = {"git": {"branch": "main"}}
+    monkeypatch.setenv("HIVEMIND_WEBUI_ENABLED", "true")
+    monkeypatch.setenv("HIVEMIND_WEBHOOK_SECRET", "test-secret")
+
+    with patch.object(sys, 'argv', ['main.py', str(config_file)]):
+        main()
+
+    mock_start_webui.assert_called_once_with(
+        port=8080,
+        reconcile_trigger=controller.trigger_reconcile,
+        webhook_secret="test-secret",
+        webhook_branch="main",
+    )
 
 
 @patch('src.main.HiveMind')

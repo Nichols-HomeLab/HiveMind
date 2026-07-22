@@ -333,19 +333,30 @@ def test_bootstrap(mock_stack_manager, mock_git_repo, config_file):
 
 @patch('src.controller.GitRepository')
 @patch('src.controller.SwarmStackManager')
-@patch('time.sleep')
-def test_run_loop(mock_sleep, mock_stack_manager, mock_git_repo, config_file):
+def test_run_loop(mock_stack_manager, mock_git_repo, config_file):
     """Test main run loop"""
     hivemind = HiveMind(config_file)
     hivemind.git_repo.current_commit = "abc123"
     hivemind.git_repo.clone_or_pull = Mock(return_value=False)
-    
-    mock_sleep.side_effect = [None, KeyboardInterrupt()]
+    hivemind._reconcile_event = Mock()
+    hivemind._reconcile_event.wait.side_effect = [False, KeyboardInterrupt()]
     
     hivemind.run()
     
     assert hivemind.running is False
-    assert mock_sleep.call_count == 2
+    assert hivemind._reconcile_event.wait.call_count == 2
+    hivemind._reconcile_event.wait.assert_called_with(timeout=60)
+
+
+@patch('src.controller.GitRepository')
+@patch('src.controller.SwarmStackManager')
+def test_trigger_reconcile_wakes_run_loop(mock_stack_manager, mock_git_repo, config_file):
+    hivemind = HiveMind(config_file)
+    hivemind._reconcile_event = Mock()
+
+    hivemind.trigger_reconcile()
+
+    hivemind._reconcile_event.set.assert_called_once_with()
 
 
 @patch('src.controller.GitRepository')
