@@ -295,6 +295,44 @@ def test_deploy_stack_updated(mock_run, stack_manager, stack_config, tmp_path):
 
 
 @patch('subprocess.run')
+def test_deploy_stack_update_can_be_deferred(mock_run, stack_manager, stack_config, tmp_path):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  app:\n    image: example/app:2.0\n")
+    stack_manager.deployed_stacks[stack_config.name] = "oldhash"
+    stack_manager.deployed_service_images[stack_config.name] = {"app": "example/app:1.0"}
+
+    result = stack_manager.deploy_stack(
+        stack_config,
+        [compose_file],
+        update_guard=lambda name: (False, "waiting for midnight"),
+    )
+
+    assert result.status == "deferred"
+    assert result.detail == "waiting for midnight"
+    assert stack_manager.deployed_stacks[stack_config.name] == "oldhash"
+    mock_run.assert_not_called()
+
+
+@patch('subprocess.run')
+def test_deploy_stack_does_not_defer_initial_install(
+    mock_run, stack_manager, stack_config, tmp_path
+):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  app:\n    image: example/app:1.0\n")
+    update_guard = Mock(return_value=(False, "active playback"))
+    mock_run.return_value = Mock(stdout="Stack deployed", returncode=0)
+
+    result = stack_manager.deploy_stack(
+        stack_config,
+        [compose_file],
+        update_guard=update_guard,
+    )
+
+    assert result.status == "new"
+    update_guard.assert_not_called()
+
+
+@patch('subprocess.run')
 def test_deploy_stack_error(mock_run, stack_manager, stack_config, tmp_path):
     """Test error handling during stack deployment"""
     compose_file = tmp_path / "compose.yml"

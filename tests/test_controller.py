@@ -58,6 +58,20 @@ def test_hivemind_initialization(mock_stack_manager, mock_git_repo, config_file)
 
 @patch('src.controller.GitRepository')
 @patch('src.controller.SwarmStackManager')
+def test_hivemind_restores_deferred_updates_after_restart(
+    mock_stack_manager, mock_git_repo, config_file
+):
+    """Persisted deferrals trigger reconciliation even without a new Git commit."""
+    gate = Mock(enabled=True, pending_stacks={"plex"})
+
+    with patch('src.controller.MediaUpdateGate.from_env', return_value=gate):
+        hivemind = HiveMind(config_file)
+
+    assert hivemind.pending_updates == {"plex"}
+
+
+@patch('src.controller.GitRepository')
+@patch('src.controller.SwarmStackManager')
 def test_load_config(mock_stack_manager, mock_git_repo, config_file):
     """Test configuration loading"""
     hivemind = HiveMind(config_file)
@@ -136,6 +150,41 @@ def test_reconcile_no_changes(mock_stack_manager, mock_git_repo, config_file):
     hivemind.git_repo.current_commit = "abc123"
     hivemind.reconcile()
     hivemind.stack_manager.deploy_stack.assert_not_called()
+
+
+@patch('src.controller.GitRepository')
+@patch('src.controller.SwarmStackManager')
+def test_reconcile_retries_deferred_update_without_new_commit(
+    mock_stack_manager, mock_git_repo, config_file, tmp_path
+):
+    """A deferred update remains eligible for reconciliation between Git commits."""
+    hivemind = HiveMind(config_file)
+    hivemind.git_repo.clone_or_pull = Mock(side_effect=[True, False])
+    hivemind.git_repo.current_commit = "abc123"
+
+    stacks_file = tmp_path / "stacks.yml"
+    stacks_file.write_text(
+        yaml.safe_dump(
+            {"stacks": [{"name": "plex", "compose_file": "plex.yml", "enabled": True}]}
+        )
+    )
+    compose_file = tmp_path / "plex.yml"
+    compose_file.write_text("services:\n  plex:\n    image: plexinc/pms-docker:latest\n")
+    hivemind.git_repo.get_file_path = Mock(side_effect=lambda path: tmp_path / path)
+    hivemind.stack_manager.list_stacks = Mock(return_value=["plex"])
+    hivemind.stack_manager.deploy_stack = Mock(
+        side_effect=[
+            DeployResult(status="deferred", detail="waiting for midnight"),
+            DeployResult(status="updated"),
+        ]
+    )
+
+    hivemind.reconcile()
+    assert hivemind.pending_updates == {"plex"}
+    hivemind.reconcile()
+
+    assert hivemind.stack_manager.deploy_stack.call_count == 2
+    assert hivemind.pending_updates == set()
 
 
 @patch('src.controller.GitRepository')

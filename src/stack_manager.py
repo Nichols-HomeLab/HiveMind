@@ -11,7 +11,7 @@ import yaml
 import codecs
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("hivemind.stack")
@@ -70,6 +70,7 @@ class SwarmStackManager:
         stack: StackConfig,
         compose_paths: List[Path],
         env_file: Optional[Path] = None,
+        update_guard: Optional[Callable[[str], Tuple[bool, str]]] = None,
     ) -> DeployResult:
         """Deploy or update a Docker stack"""
         logger.info(f"Starting deployment for stack: {stack.name}")
@@ -125,6 +126,11 @@ class SwarmStackManager:
                 logger.info(f"Stack {stack.name} has changes, updating")
                 status = "updated"
                 image_changes = self._describe_image_changes(stack.name, previous_images, service_images)
+                if update_guard:
+                    allowed, detail = update_guard(stack.name)
+                    if not allowed:
+                        logger.info("Deferring stack update for %s: %s", stack.name, detail)
+                        return DeployResult(status="deferred", detail=detail, image_changes=image_changes)
             else:
                 logger.info(f"Stack {stack.name} is new, deploying")
                 image_changes = self._describe_new_services(stack.name, service_images)

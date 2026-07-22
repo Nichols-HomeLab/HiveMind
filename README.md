@@ -98,6 +98,41 @@ openssl rand -hex 32 | docker secret create hivemind_webhook_secret -
 Polling remains as a recovery mechanism for missed deliveries. A longer value such as `3600`
 is recommended when webhooks are enabled.
 
+### Playback-aware Plex and Jellyfin updates
+
+HiveMind can protect existing Plex and Jellyfin stacks from disruptive updates. A protected
+update is first attempted during the configured midnight window. If a configured server API
+reports that a movie or episode is playing, HiveMind retries with exponential backoff. It
+deploys as soon as playback is idle, or forcibly deploys at the scheduled time on the third
+day. New stacks are deployed immediately.
+
+All media-update behavior is configured with environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HIVEMIND_MEDIA_UPDATE_ENABLED` | `false` | Enable protected media-stack update scheduling |
+| `HIVEMIND_PLEX_STACKS` | `plex` | Comma-separated Plex stack names (case-insensitive) |
+| `HIVEMIND_PLEX_URL` | - | Plex base URL, such as `http://plex:32400` |
+| `HIVEMIND_PLEX_TOKEN` | - | Plex API token |
+| `HIVEMIND_JELLYFIN_STACKS` | `jellyfin` | Comma-separated Jellyfin stack names (case-insensitive) |
+| `HIVEMIND_JELLYFIN_URL` | - | Jellyfin base URL, such as `http://jellyfin:8096` |
+| `HIVEMIND_JELLYFIN_API_KEY` | - | Jellyfin API key |
+| `HIVEMIND_MEDIA_UPDATE_TIMEZONE` | `UTC` | IANA timezone used by the schedule |
+| `HIVEMIND_MEDIA_UPDATE_HOUR` | `0` | Scheduled deployment hour (`0` is midnight) |
+| `HIVEMIND_MEDIA_UPDATE_MINUTE` | `0` | Scheduled deployment minute |
+| `HIVEMIND_MEDIA_UPDATE_WINDOW_MINUTES` | `60` | Window in which a newly seen update may use today's scheduled time |
+| `HIVEMIND_MEDIA_UPDATE_BACKOFF_SECONDS` | `300` | Initial playback retry delay |
+| `HIVEMIND_MEDIA_UPDATE_MAX_BACKOFF_SECONDS` | `21600` | Maximum playback retry delay |
+| `HIVEMIND_MEDIA_UPDATE_MAX_DEFERRAL_DAYS` | `3` | Forced-deployment deadline in scheduled days |
+| `HIVEMIND_MEDIA_API_TIMEOUT_SECONDS` | `10` | Plex/Jellyfin request timeout |
+| `HIVEMIND_MEDIA_UPDATE_STATE_FILE` | `/var/lib/hivemind/media-update-state.json` | Persistent retry-state path |
+
+If a server URL/token pair is omitted, that stack still waits for its scheduled time but skips
+the playback check. If an API is configured but unavailable, HiveMind fails closed and backs
+off until the API succeeds or the forced-deployment deadline is reached. Persist the state-file
+directory (as the supplied Compose and Swarm manifests do) so the three-day deadline survives
+controller restarts.
+
 **Example `.env` file:**
 ```bash
 HIVEMIND_GIT_URL=https://github.com/yourusername/your-infra-repo.git

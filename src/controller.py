@@ -11,6 +11,7 @@ from typing import Dict, List
 from .git_manager import GitRepository, GitConfig
 from .stack_manager import SwarmStackManager, StackConfig
 from .notifier import SMTPNotifier
+from .media_updates import MediaUpdateGate
 
 logger = logging.getLogger("hivemind.controller")
 
@@ -38,6 +39,16 @@ class HiveMind:
         logger.debug("Initializing Swarm stack manager")
         self.stack_manager = SwarmStackManager()
         logger.info("Swarm stack manager initialized")
+
+        self.media_update_gate = MediaUpdateGate.from_env()
+        self.pending_updates: set[str] = self.media_update_gate.pending_stacks
+        if self.media_update_gate.enabled:
+            logger.info("Playback-aware media stack update scheduling enabled")
+            if self.pending_updates:
+                logger.info(
+                    "Restored %d deferred media stack update(s)",
+                    len(self.pending_updates),
+                )
 
         self.notifier = None
         smtp_cfg = (self.config.get("notifications") or {}).get("smtp")
@@ -134,9 +145,11 @@ class HiveMind:
             logger.error(f"Failed to sync repository: {e}", exc_info=True)
             return
         
-        if not has_changes and self.git_repo.current_commit:
+        if not has_changes and self.git_repo.current_commit and not self.pending_updates:
             logger.info("No changes detected, skipping reconciliation")
             return
+        if not has_changes and self.pending_updates:
+            logger.info("Retrying %d deferred stack update(s)", len(self.pending_updates))
         
         logger.debug("Loading stacks configuration")
         stacks = self._load_stacks_config()
@@ -144,6 +157,8 @@ class HiveMind:
         if not stacks:
             logger.warning("No stacks configured")
             return
+
+        self.media_update_gate.retain({stack.name for stack in stacks})
         
         enabled_stacks = set()
         obsolete_stacks = set()
@@ -153,6 +168,7 @@ class HiveMind:
             "unchanged": [],
             "failed": [],
             "skipped": [],
+            "deferred": [],
             "detail_lines": [],
         }
         logger.info(f"Processing {len(stacks)} stack(s)")
@@ -186,19 +202,40 @@ class HiveMind:
                 
                 logger.info(f"Deploying stack: {stack.name}")
                 try:
-                    result = self.stack_manager.deploy_stack(stack, compose_paths, env_file)
+                    def update_guard(stack_name: str):
+                        decision = self.media_update_gate.evaluate(stack_name)
+                        return decision.allowed, decision.detail
+
+                    result = self.stack_manager.deploy_stack(
+                        stack, compose_paths, env_file, update_guard=update_guard
+                    )
                     deployment_results.setdefault(result.status, []).append(stack.name)
                     if result.image_changes:
-                        deployment_results["detail_lines"].extend(result.image_changes)
-                    if result.status != "failed":
+                        if result.status == "deferred":
+                            deployment_results["detail_lines"].extend(
+                                line.replace("Updated ", "Pending ", 1)
+                                for line in result.image_changes
+                            )
+                        else:
+                            deployment_results["detail_lines"].extend(result.image_changes)
+                    if result.status == "deferred" and result.detail:
+                        deployment_results["detail_lines"].append(
+                            f"Deferred {stack.name}: {result.detail}"
+                        )
+                    else:
+                        self.media_update_gate.clear(stack.name)
+                    if result.status in {"new", "updated", "unchanged"}:
                         obsolete_stacks.update(stack.replaces or [])
                 except Exception as e:
                     logger.error(f"Failed to deploy stack {stack.name}: {e}", exc_info=True)
                     deployment_results["failed"].append(stack.name)
             else:
                 logger.info(f"Stack {stack.name} is disabled, skipping deployment")
+                self.media_update_gate.clear(stack.name)
                 deployment_results["skipped"].append(stack.name)
         
+        self.pending_updates = set(deployment_results["deferred"])
+
         logger.debug("Checking for stacks to remove")
         deployed_stacks = set(self.stack_manager.list_stacks())
         managed_stacks = set(s.name for s in stacks)
@@ -224,7 +261,7 @@ class HiveMind:
         logger.info("Reconciliation complete")
         logger.info("=" * 60)
 
-        if has_changes:
+        if has_changes or deployment_results["new"] or deployment_results["updated"]:
             self._notify_update(previous_commit, self.git_repo.current_commit, deployment_results)
 
     def _notify_update(self, previous_commit, current_commit, deployment_results: Dict[str, List[str]]):
@@ -248,6 +285,7 @@ class HiveMind:
             ("Unchanged stacks", "unchanged"),
             ("Failed stacks", "failed"),
             ("Skipped disabled stacks", "skipped"),
+            ("Deferred media updates", "deferred"),
         ):
             stack_names = deployment_results.get(key, [])
             if stack_names:
