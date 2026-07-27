@@ -31,6 +31,7 @@ class StackConfig:
     enabled: bool = True
     env_file: Optional[str] = None
     replaces: Optional[List[str]] = None
+    deploy_command: Optional[List[str]] = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class SwarmStackManager:
         compose_paths: List[Path],
         env_file: Optional[Path] = None,
         update_guard: Optional[Callable[[str], Tuple[bool, str]]] = None,
+        working_directory: Optional[Path] = None,
     ) -> DeployResult:
         """Deploy or update a Docker stack"""
         logger.info(f"Starting deployment for stack: {stack.name}")
@@ -80,7 +82,11 @@ class SwarmStackManager:
         try:
             service_images = self._extract_service_images(compose_paths)
             logger.debug(f"Calculating hash for stack {stack.name}")
-            compose_hash = self._calculate_stack_hash(compose_paths, env_file)
+            compose_hash = self._calculate_stack_hash(
+                compose_paths,
+                env_file,
+                stack.deploy_command,
+            )
             logger.debug(f"Stack hash: {compose_hash[:16]}...")
             status = "new"
             image_changes: List[str] = []
@@ -150,11 +156,38 @@ class SwarmStackManager:
                 logger.warning(f"Environment file specified but not found: {env_file}")
 
             try:
-                rendered_compose = self._render_compose_file(stack.name, compose_paths, env)
-                cmd = ["docker", "stack", "deploy", "--compose-file", str(rendered_compose), stack.name]
-                logger.debug(f"Executing docker command: docker stack deploy ... {stack.name}")
-
-                result = subprocess.run(cmd, check=True, capture_output=True, text=True, env=env)
+                if stack.deploy_command:
+                    if working_directory is None:
+                        raise ValueError(
+                            f"Stack {stack.name} has deploy_command but no working directory"
+                        )
+                    logger.info("Executing custom deploy command for stack %s", stack.name)
+                    result = subprocess.run(
+                        stack.deploy_command,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                        cwd=working_directory,
+                    )
+                else:
+                    rendered_compose = self._render_compose_file(stack.name, compose_paths, env)
+                    cmd = [
+                        "docker",
+                        "stack",
+                        "deploy",
+                        "--compose-file",
+                        str(rendered_compose),
+                        stack.name,
+                    ]
+                    logger.debug(f"Executing docker command: docker stack deploy ... {stack.name}")
+                    result = subprocess.run(
+                        cmd,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                    )
                 logger.info(f"Stack {stack.name} deployed successfully")
                 if result.stdout:
                     logger.debug(f"Docker output: {result.stdout}")
@@ -252,7 +285,12 @@ class SwarmStackManager:
             logger.error(f"Failed to calculate hash for {file_path}: {e}", exc_info=True)
             raise
 
-    def _calculate_stack_hash(self, compose_paths: List[Path], env_file: Optional[Path]) -> str:
+    def _calculate_stack_hash(
+        self,
+        compose_paths: List[Path],
+        env_file: Optional[Path],
+        deploy_command: Optional[List[str]] = None,
+    ) -> str:
         """Calculate stack hash based on compose files and env file"""
         logger.debug("Calculating combined stack hash")
         try:
@@ -269,6 +307,11 @@ class SwarmStackManager:
                 logger.debug("Environment file hash added to stack hash")
             elif env_file:
                 logger.debug(f"Environment file not found: {env_file}")
+
+            if deploy_command:
+                command_data = json.dumps(deploy_command, separators=(",", ":"))
+                sha256_hash.update(command_data.encode("utf-8"))
+                logger.debug("Custom deployment command added to stack hash")
             
             stack_hash = sha256_hash.hexdigest()
             logger.debug(f"Combined stack hash: {stack_hash[:16]}...")

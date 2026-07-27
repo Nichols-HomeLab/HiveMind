@@ -102,6 +102,39 @@ def test_load_stacks_config_from_repo(mock_stack_manager, mock_git_repo, config_
 
 @patch('src.controller.GitRepository')
 @patch('src.controller.SwarmStackManager')
+def test_load_stacks_config_validates_deploy_command(
+    mock_stack_manager, mock_git_repo, config_file, tmp_path
+):
+    stacks_file = tmp_path / "stacks.yml"
+    stacks_file.write_text(
+        yaml.safe_dump(
+            {
+                "stacks": [
+                    {
+                        "name": "valid",
+                        "compose_file": "valid.yml",
+                        "deploy_command": ["scripts/deploy-stack.sh", "valid"],
+                    },
+                    {
+                        "name": "invalid",
+                        "compose_file": "invalid.yml",
+                        "deploy_command": "scripts/deploy-stack.sh invalid",
+                    },
+                ]
+            }
+        )
+    )
+    hivemind = HiveMind(config_file)
+    hivemind.git_repo.get_file_path = Mock(return_value=stacks_file)
+
+    stacks = hivemind._load_stacks_config()
+
+    assert [stack.name for stack in stacks] == ["valid"]
+    assert stacks[0].deploy_command == ["scripts/deploy-stack.sh", "valid"]
+
+
+@patch('src.controller.GitRepository')
+@patch('src.controller.SwarmStackManager')
 def test_load_stacks_config_from_hivemind_config(mock_stack_manager, mock_git_repo, tmp_path):
     """Test loading stacks from HiveMind config when repo file doesn't exist"""
     config = {

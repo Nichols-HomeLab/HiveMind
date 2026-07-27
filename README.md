@@ -167,6 +167,9 @@ stacks:
       - stacks/traefik/authentik.yml
     enabled: true
     env_file: stacks/traefik/.env  # Optional
+    # Optional argv-style command for stateful stacks that need guarded rollout.
+    # It runs from the checked-out repository instead of `docker stack deploy`.
+    deploy_command: [scripts/deploy-stack.sh, databases]
     replaces:
       - old-traefik
 

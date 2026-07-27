@@ -246,6 +246,51 @@ def test_deploy_stack_with_env_file(mock_run, stack_manager, stack_config, tmp_p
 
 
 @patch('subprocess.run')
+def test_deploy_stack_with_custom_command(mock_run, stack_manager, tmp_path):
+    """Custom deploy commands run from the repository without a parallel stack deploy."""
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  db:\n    image: mariadb:latest\n")
+    stack_config = StackConfig(
+        name="databases",
+        compose_file="compose.yml",
+        deploy_command=["scripts/deploy-stack.sh", "databases"],
+    )
+    mock_run.return_value = Mock(stdout="Database stack deployed safely", returncode=0)
+
+    result = stack_manager.deploy_stack(
+        stack_config,
+        [compose_file],
+        working_directory=tmp_path,
+    )
+
+    assert result.status == "new"
+    custom_call = next(
+        call
+        for call in mock_run.call_args_list
+        if call.args[0] == ["scripts/deploy-stack.sh", "databases"]
+    )
+    assert custom_call.kwargs["cwd"] == tmp_path
+    assert not any(
+        call.args[0][:3] == ["docker", "stack", "deploy"]
+        for call in mock_run.call_args_list
+    )
+
+
+def test_custom_command_changes_stack_hash(stack_manager, tmp_path):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  db:\n    image: mariadb:latest\n")
+
+    default_hash = stack_manager._calculate_stack_hash([compose_file], None)
+    guarded_hash = stack_manager._calculate_stack_hash(
+        [compose_file],
+        None,
+        ["scripts/deploy-stack.sh", "databases"],
+    )
+
+    assert guarded_hash != default_hash
+
+
+@patch('subprocess.run')
 def test_deploy_stack_with_sops_env_file(mock_run, stack_manager, stack_config, tmp_path):
     """Test stack deployment with SOPS encrypted environment file"""
     compose_file = tmp_path / "compose.yml"

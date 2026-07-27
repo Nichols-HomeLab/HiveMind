@@ -121,6 +121,13 @@ class HiveMind:
             try:
                 if not stack_data.get("compose_file") and not stack_data.get("compose_files"):
                     raise ValueError("stack requires compose_file or compose_files")
+                deploy_command = stack_data.get("deploy_command")
+                if deploy_command is not None and (
+                    not isinstance(deploy_command, list)
+                    or not deploy_command
+                    or not all(isinstance(argument, str) and argument for argument in deploy_command)
+                ):
+                    raise ValueError("deploy_command must be a non-empty list of strings")
                 stack = StackConfig(**stack_data)
                 stacks.append(stack)
                 logger.debug(f"Loaded stack configuration: {stack.name}")
@@ -207,7 +214,11 @@ class HiveMind:
                         return decision.allowed, decision.detail
 
                     result = self.stack_manager.deploy_stack(
-                        stack, compose_paths, env_file, update_guard=update_guard
+                        stack,
+                        compose_paths,
+                        env_file,
+                        update_guard=update_guard,
+                        working_directory=self.git_repo.repo_path,
                     )
                     deployment_results.setdefault(result.status, []).append(stack.name)
                     if result.image_changes:
