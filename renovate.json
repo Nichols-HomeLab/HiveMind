@@ -4,16 +4,18 @@
     "config:recommended",
     "docker:pinDigests"
   ],
+  "minimumReleaseAge": "3 days",
   "automerge": true,
+  "automergeType": "pr",
   "enabledManagers": [
     "dockerfile",
     "github-actions",
     "pip_requirements"
   ],
   "pip_requirements": {
-    "fileMatch": [
-      "(^|/)requirements\\.txt$",
-      "(^|/)requirements\\.(dev|test|prod)\\.txt$"
+    "managerFilePatterns": [
+      "/(^|/)requirements\\.txt$/",
+      "/(^|/)requirements\\.(dev|test|prod)\\.txt$/"
     ]
   }
 }
