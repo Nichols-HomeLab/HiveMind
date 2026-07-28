@@ -40,6 +40,8 @@ class DeployResult:
     status: str
     detail: Optional[str] = None
     image_changes: List[str] = field(default_factory=list)
+    applied_services: List[str] = field(default_factory=list)
+    deferred_services: List[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
@@ -54,6 +56,7 @@ class PersistedStackState:
     service_names: List[str] = field(default_factory=list)
     stack_hash: Optional[str] = None
     service_images: Dict[str, str] = field(default_factory=dict)
+    service_hashes: Dict[str, str] = field(default_factory=dict)
     detail: Optional[str] = None
 
 
@@ -64,6 +67,7 @@ class SwarmStackManager:
         logger.debug("Initializing SwarmStackManager")
         self.deployed_stacks: Dict[str, str] = {}
         self.deployed_service_images: Dict[str, Dict[str, str]] = {}
+        self.deployed_service_hashes: Dict[str, Dict[str, str]] = {}
         logger.info("SwarmStackManager initialized")
     
     def deploy_stack(
@@ -71,7 +75,7 @@ class SwarmStackManager:
         stack: StackConfig,
         compose_paths: List[Path],
         env_file: Optional[Path] = None,
-        update_guard: Optional[Callable[[str], Tuple[bool, str]]] = None,
+        update_guard: Optional[Callable[[str, Optional[str]], Tuple[bool, str]]] = None,
         working_directory: Optional[Path] = None,
     ) -> DeployResult:
         """Deploy or update a Docker stack"""
@@ -96,23 +100,22 @@ class SwarmStackManager:
                 if persisted.status == "tracked":
                     self.deployed_stacks[stack.name] = persisted.stack_hash or ""
                     self.deployed_service_images[stack.name] = persisted.service_images
+                    self.deployed_service_hashes[stack.name] = persisted.service_hashes
                     logger.info(
                         "Restored deployment state for stack %s from a Swarm config",
                         stack.name,
                     )
                 elif persisted.status == "untracked":
                     logger.warning(
-                        "Adopting existing unlabeled stack %s without redeploying it",
+                        "Adopting existing unlabeled stack %s and recording a service baseline",
                         stack.name,
                     )
-                    if not self._persist_stack_state(stack.name, compose_hash, service_images):
-                        return DeployResult(
-                            status="failed",
-                            detail=f"Failed to persist deployment state for existing stack {stack.name}",
-                        )
                     self.deployed_stacks[stack.name] = compose_hash
-                    self.deployed_service_images[stack.name] = service_images
-                    return DeployResult(status="unchanged", detail="adopted existing stack")
+                    self.deployed_service_images[stack.name] = (
+                        persisted.service_images or service_images
+                    )
+                    self.deployed_service_hashes[stack.name] = {}
+                    status = "updated"
                 elif persisted.status in {"error", "inconsistent"}:
                     logger.error(
                         "Refusing to deploy stack %s because persisted state is %s: %s",
@@ -126,17 +129,18 @@ class SwarmStackManager:
                 previous_hash = self.deployed_stacks[stack.name]
                 previous_images = self.deployed_service_images.get(stack.name, {})
                 logger.debug(f"Previous hash: {previous_hash[:16]}...")
-                if previous_hash == compose_hash:
+                if previous_hash == compose_hash and (
+                    stack.deploy_command
+                    or self.deployed_service_hashes.get(stack.name)
+                ):
                     logger.info(f"Stack {stack.name} is up to date (hash match)")
                     return DeployResult(status="unchanged")
-                logger.info(f"Stack {stack.name} has changes, updating")
-                status = "updated"
-                image_changes = self._describe_image_changes(stack.name, previous_images, service_images)
-                if update_guard:
-                    allowed, detail = update_guard(stack.name)
-                    if not allowed:
-                        logger.info("Deferring stack update for %s: %s", stack.name, detail)
-                        return DeployResult(status="deferred", detail=detail, image_changes=image_changes)
+                if previous_hash != compose_hash:
+                    logger.info(f"Stack {stack.name} has changes, updating")
+                    status = "updated"
+                    image_changes = self._describe_image_changes(
+                        stack.name, previous_images, service_images
+                    )
             else:
                 logger.info(f"Stack {stack.name} is new, deploying")
                 image_changes = self._describe_new_services(stack.name, service_images)
@@ -156,7 +160,17 @@ class SwarmStackManager:
                 logger.warning(f"Environment file specified but not found: {env_file}")
 
             try:
+                result = None
                 if stack.deploy_command:
+                    if status == "updated" and update_guard:
+                        allowed, detail = update_guard(stack.name, None)
+                        if not allowed:
+                            logger.info("Deferring stack update for %s: %s", stack.name, detail)
+                            return DeployResult(
+                                status="deferred",
+                                detail=detail,
+                                image_changes=image_changes,
+                            )
                     if working_directory is None:
                         raise ValueError(
                             f"Stack {stack.name} has deploy_command but no working directory"
@@ -170,34 +184,147 @@ class SwarmStackManager:
                         env=env,
                         cwd=working_directory,
                     )
+                    applied_services = sorted(service_images)
+                    service_hashes: Dict[str, str] = {}
                 else:
-                    rendered_compose = self._render_compose_file(stack.name, compose_paths, env)
-                    cmd = [
-                        "docker",
-                        "stack",
-                        "deploy",
-                        "--compose-file",
-                        str(rendered_compose),
-                        stack.name,
-                    ]
-                    logger.debug(f"Executing docker command: docker stack deploy ... {stack.name}")
-                    result = subprocess.run(
-                        cmd,
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        env=env,
+                    rendered_compose = self._render_compose_file(
+                        stack.name, compose_paths, env
                     )
-                logger.info(f"Stack {stack.name} deployed successfully")
-                if result.stdout:
+                    rendered_data = yaml.safe_load(rendered_compose.read_text()) or {}
+                    service_hashes = self._calculate_service_hashes(rendered_data)
+                    service_images = self._extract_rendered_service_images(rendered_data)
+
+                    previous_hashes = self.deployed_service_hashes.get(stack.name, {})
+                    if status == "new":
+                        changed_services = set(service_hashes)
+                        removed_services: set[str] = set()
+                    elif not previous_hashes:
+                        if previous_hash == compose_hash:
+                            logger.info(
+                                "Backfilling per-service deployment state for stack %s",
+                                stack.name,
+                            )
+                            if not self._persist_stack_state(
+                                stack.name,
+                                compose_hash,
+                                service_images,
+                                service_hashes,
+                            ):
+                                return DeployResult(
+                                    status="failed",
+                                    detail=(
+                                        "Failed to persist per-service deployment state "
+                                        f"for existing stack {stack.name}"
+                                    ),
+                                )
+                            self.deployed_service_images[stack.name] = service_images
+                            self.deployed_service_hashes[stack.name] = service_hashes
+                            return DeployResult(
+                                status="unchanged",
+                                detail="backfilled per-service deployment state",
+                            )
+                        logger.warning(
+                            "No per-service baseline exists for changed stack %s; "
+                            "treating all services as changed once",
+                            stack.name,
+                        )
+                        changed_services = set(service_hashes)
+                        removed_services = set(previous_images) - set(service_hashes)
+                    else:
+                        changed_services = {
+                            name
+                            for name, fingerprint in service_hashes.items()
+                            if previous_hashes.get(name) != fingerprint
+                        }
+                        removed_services = set(previous_hashes) - set(service_hashes)
+
+                    candidates = sorted(changed_services | removed_services)
+                    allowed_services: List[str] = []
+                    deferred: Dict[str, str] = {}
+                    for service_name in candidates:
+                        if update_guard and status != "new":
+                            allowed, detail = update_guard(stack.name, service_name)
+                            if not allowed:
+                                deferred[service_name] = detail
+                                continue
+                        allowed_services.append(service_name)
+
+                    deploy_services = sorted(changed_services & set(allowed_services))
+                    remove_services = sorted(removed_services & set(allowed_services))
+                    if deploy_services:
+                        partial_compose = self._write_partial_compose(
+                            stack.name, rendered_data, deploy_services
+                        )
+                        try:
+                            result = self._deploy_compose(stack.name, partial_compose, env)
+                        finally:
+                            partial_compose.unlink(missing_ok=True)
+                    if remove_services:
+                        self._remove_services(stack.name, remove_services)
+
+                    if not candidates:
+                        logger.info(
+                            "Stack %s changed, but no rendered service definitions changed",
+                            stack.name,
+                        )
+
+                    if deferred:
+                        deployed_hashes = dict(previous_hashes)
+                        deployed_images = dict(previous_images)
+                        for service_name in deploy_services:
+                            deployed_hashes[service_name] = service_hashes[service_name]
+                            if service_name in service_images:
+                                deployed_images[service_name] = service_images[service_name]
+                        for service_name in remove_services:
+                            deployed_hashes.pop(service_name, None)
+                            deployed_images.pop(service_name, None)
+                        if not self._persist_stack_state(
+                            stack.name,
+                            previous_hash,
+                            deployed_images,
+                            deployed_hashes,
+                        ):
+                            return DeployResult(
+                                status="failed",
+                                detail=f"Failed to persist partial deployment state for {stack.name}",
+                            )
+                        self.deployed_service_images[stack.name] = deployed_images
+                        self.deployed_service_hashes[stack.name] = deployed_hashes
+                        detail = "; ".join(
+                            f"{name}: {reason}" for name, reason in sorted(deferred.items())
+                        )
+                        logger.info(
+                            "Deferred %d service update(s) in stack %s: %s",
+                            len(deferred),
+                            stack.name,
+                            detail,
+                        )
+                        return DeployResult(
+                            status="deferred",
+                            detail=detail,
+                            image_changes=image_changes,
+                            applied_services=sorted(allowed_services),
+                            deferred_services=sorted(deferred),
+                        )
+
+                    applied_services = sorted(allowed_services)
+                if applied_services:
+                    logger.info(
+                        "Stack %s applied service changes: %s",
+                        stack.name,
+                        ", ".join(applied_services),
+                    )
+                if result and result.stdout:
                     logger.debug(f"Docker output: {result.stdout}")
-                if result.stderr:
+                if result and result.stderr:
                     logger.debug(f"Docker stderr: {result.stderr}")
             finally:
                 if rendered_compose and rendered_compose.exists():
                     rendered_compose.unlink()
 
-            if not self._persist_stack_state(stack.name, compose_hash, service_images):
+            if not self._persist_stack_state(
+                stack.name, compose_hash, service_images, service_hashes
+            ):
                 return DeployResult(
                     status="failed",
                     detail=f"Stack {stack.name} deployed but its reconciliation state was not persisted",
@@ -205,8 +332,14 @@ class SwarmStackManager:
 
             self.deployed_stacks[stack.name] = compose_hash
             self.deployed_service_images[stack.name] = service_images
+            self.deployed_service_hashes[stack.name] = service_hashes
             logger.debug(f"Updated deployed stacks cache for {stack.name}")
-            return DeployResult(status=status, image_changes=image_changes)
+            final_status = status if applied_services else "unchanged"
+            return DeployResult(
+                status=final_status,
+                image_changes=image_changes,
+                applied_services=applied_services,
+            )
             
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to deploy stack {stack.name} (exit code {e.returncode}): {e}")
@@ -240,6 +373,7 @@ class SwarmStackManager:
             if stack_name in self.deployed_service_images:
                 del self.deployed_service_images[stack_name]
                 logger.debug(f"Removed {stack_name} service image cache")
+            self.deployed_service_hashes.pop(stack_name, None)
             self._remove_persisted_stack_state(stack_name)
             return True
         except subprocess.CalledProcessError as e:
@@ -441,6 +575,151 @@ class SwarmStackManager:
             yaml.safe_dump(rendered, handle, sort_keys=False)
         return Path(handle.name)
 
+    def _calculate_service_hashes(self, compose_data: dict) -> Dict[str, str]:
+        """Fingerprint each rendered service and the top-level resources it uses."""
+        services = compose_data.get("services") or {}
+        if not isinstance(services, dict):
+            return {}
+
+        hashes: Dict[str, str] = {}
+        for service_name, service in services.items():
+            if not isinstance(service, dict):
+                continue
+            payload = {
+                "service": service,
+                "resources": self._referenced_resources(compose_data, service),
+            }
+            canonical = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            hashes[service_name] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return hashes
+
+    def _referenced_resources(self, compose_data: dict, service: dict) -> dict:
+        """Return only top-level resources referenced by one rendered service."""
+        references: Dict[str, set[str]] = {
+            "networks": set(),
+            "volumes": set(),
+            "configs": set(),
+            "secrets": set(),
+        }
+
+        networks = service.get("networks") or {}
+        if isinstance(networks, dict):
+            references["networks"].update(networks)
+        elif isinstance(networks, list):
+            references["networks"].update(
+                item for item in networks if isinstance(item, str)
+            )
+
+        for mount in service.get("volumes") or []:
+            if isinstance(mount, dict) and mount.get("type") == "volume":
+                source = mount.get("source")
+                if isinstance(source, str):
+                    references["volumes"].add(source)
+
+        for section in ("configs", "secrets"):
+            for mount in service.get(section) or []:
+                if isinstance(mount, str):
+                    references[section].add(mount)
+                elif isinstance(mount, dict):
+                    source = mount.get("source")
+                    if isinstance(source, str):
+                        references[section].add(source)
+
+        resources = {}
+        for section, names in references.items():
+            definitions = compose_data.get(section) or {}
+            selected = {
+                name: definitions[name]
+                for name in sorted(names)
+                if isinstance(definitions, dict) and name in definitions
+            }
+            if selected:
+                resources[section] = selected
+        return resources
+
+    def _extract_rendered_service_images(self, compose_data: dict) -> Dict[str, str]:
+        services = compose_data.get("services") or {}
+        if not isinstance(services, dict):
+            return {}
+        return {
+            name: service["image"]
+            for name, service in services.items()
+            if isinstance(service, dict)
+            and isinstance(service.get("image"), str)
+            and service["image"]
+        }
+
+    def _write_partial_compose(
+        self,
+        stack_name: str,
+        compose_data: dict,
+        service_names: List[str],
+    ) -> Path:
+        """Write a stack file containing only services whose definitions changed."""
+        selected = set(service_names)
+        partial = {
+            key: value
+            for key, value in compose_data.items()
+            if key != "services"
+        }
+        partial["services"] = {
+            name: service
+            for name, service in (compose_data.get("services") or {}).items()
+            if name in selected
+        }
+        handle = tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=f".{stack_name}.partial.compose.yml",
+            prefix="hivemind.",
+            delete=False,
+        )
+        with handle:
+            yaml.safe_dump(partial, handle, sort_keys=False)
+        return Path(handle.name)
+
+    def _deploy_compose(
+        self,
+        stack_name: str,
+        compose_path: Path,
+        env: Optional[dict],
+    ) -> subprocess.CompletedProcess:
+        cmd = [
+            "docker",
+            "stack",
+            "deploy",
+            "--compose-file",
+            str(compose_path),
+            stack_name,
+        ]
+        logger.debug("Deploying changed services for stack %s", stack_name)
+        return subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+    def _remove_services(self, stack_name: str, service_names: List[str]) -> None:
+        """Remove services deleted from the desired stack definition."""
+        full_names = [f"{stack_name}_{name}" for name in service_names]
+        logger.info(
+            "Removing deleted services from stack %s: %s",
+            stack_name,
+            ", ".join(service_names),
+        )
+        subprocess.run(
+            ["docker", "service", "rm", *full_names],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
     def _discover_persisted_stack_state(self, stack_name: str) -> PersistedStackState:
         """Read a stack's reconciliation state from a Swarm config object."""
         try:
@@ -566,11 +845,15 @@ class SwarmStackManager:
             images = payload.get("service_images") or {}
             if not isinstance(images, dict):
                 raise ValueError(f"Invalid service_images in state config for {stack_name}")
+            service_hashes = payload.get("service_hashes") or {}
+            if not isinstance(service_hashes, dict):
+                raise ValueError(f"Invalid service_hashes in state config for {stack_name}")
             return PersistedStackState(
                 status="tracked",
                 service_names=service_names,
                 stack_hash=stack_hash,
                 service_images=images,
+                service_hashes=service_hashes,
             )
         except (subprocess.CalledProcessError, json.JSONDecodeError, ValueError) as exc:
             logger.error("Failed to discover persisted state for stack %s: %s", stack_name, exc)
@@ -589,6 +872,7 @@ class SwarmStackManager:
         stack_name: str,
         stack_hash: str,
         service_images: Dict[str, str],
+        service_hashes: Dict[str, str],
     ) -> bool:
         """Persist state in Swarm Raft without updating any service specs."""
         try:
@@ -615,7 +899,11 @@ class SwarmStackManager:
                 f"{STATE_CONFIG_PREFIX}-{stack_name}-{stack_hash[:12]}-{time.time_ns()}"
             )
             payload = json.dumps(
-                {"version": 1, "service_images": service_images},
+                {
+                    "version": 2,
+                    "service_images": service_images,
+                    "service_hashes": service_hashes,
+                },
                 sort_keys=True,
                 separators=(",", ":"),
             )

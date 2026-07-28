@@ -209,8 +209,8 @@ class HiveMind:
                 
                 logger.info(f"Deploying stack: {stack.name}")
                 try:
-                    def update_guard(stack_name: str):
-                        decision = self.media_update_gate.evaluate(stack_name)
+                    def update_guard(stack_name: str, service_name: str | None):
+                        decision = self.media_update_gate.evaluate(stack_name, service_name)
                         return decision.allowed, decision.detail
 
                     result = self.stack_manager.deploy_stack(
@@ -233,7 +233,9 @@ class HiveMind:
                         deployment_results["detail_lines"].append(
                             f"Deferred {stack.name}: {result.detail}"
                         )
-                    else:
+                    for service_name in result.applied_services:
+                        self.media_update_gate.clear(stack.name, service_name)
+                    if result.status in {"new", "unchanged"}:
                         self.media_update_gate.clear(stack.name)
                     if result.status in {"new", "updated", "unchanged"}:
                         obsolete_stacks.update(stack.replaces or [])
@@ -245,7 +247,10 @@ class HiveMind:
                 self.media_update_gate.clear(stack.name)
                 deployment_results["skipped"].append(stack.name)
         
-        self.pending_updates = set(deployment_results["deferred"])
+        self.pending_updates = (
+            self.media_update_gate.pending_stacks
+            | set(deployment_results["deferred"])
+        )
 
         logger.debug("Checking for stacks to remove")
         deployed_stacks = set(self.stack_manager.list_stacks())

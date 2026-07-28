@@ -3,6 +3,7 @@
 import base64
 import json
 import pytest
+import yaml
 from pathlib import Path
 from unittest.mock import Mock, patch, mock_open
 from src.stack_manager import (
@@ -31,6 +32,21 @@ def stack_config():
         enabled=True,
         env_file=".env"
     )
+
+
+def configure_compose_run(mock_run, compose_file):
+    """Return realistic output for Compose rendering and successful Docker calls."""
+    def run(command, *args, **kwargs):
+        if command[:2] == ["docker", "compose"]:
+            stdout = "" if command[-1] == "--quiet" else compose_file.read_text()
+            return Mock(stdout=stdout, stderr="", returncode=0)
+        if command[:3] == ["docker", "stack", "ls"]:
+            return Mock(stdout="", stderr="", returncode=0)
+        if command[:3] == ["docker", "config", "ls"]:
+            return Mock(stdout="", stderr="", returncode=0)
+        return Mock(stdout="Stack deployed", stderr="", returncode=0)
+
+    mock_run.side_effect = run
 
 
 def test_stack_config_creation():
@@ -204,7 +220,7 @@ def test_deploy_stack_success(mock_run, stack_manager, stack_config, tmp_path):
     compose_file.write_text(
         "version: '3'\nservices:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:latest\n"
     )
-    mock_run.return_value = Mock(stdout="Stack deployed", returncode=0)
+    configure_compose_run(mock_run, compose_file)
     result = stack_manager.deploy_stack(stack_config, [compose_file])
     assert result.status == "new"
     assert result.image_changes == [
@@ -228,6 +244,7 @@ def test_deploy_stack_up_to_date(mock_run, stack_manager, stack_config, tmp_path
     stack_manager.deployed_service_images[stack_config.name] = {
         "bazarr": "lscr.io/linuxserver/bazarr:latest"
     }
+    stack_manager.deployed_service_hashes[stack_config.name] = {"bazarr": "service-hash"}
     result = stack_manager.deploy_stack(stack_config, [compose_file])
     assert result == DeployResult(status="unchanged")
     mock_run.assert_not_called()
@@ -240,7 +257,7 @@ def test_deploy_stack_with_env_file(mock_run, stack_manager, stack_config, tmp_p
     compose_file.write_text("version: '3'\nservices:\n  bazarr:\n    image: lscr.io/linuxserver/bazarr:latest\n")
     env_file = tmp_path / ".env"
     env_file.write_text("VAR=value")
-    mock_run.return_value = Mock(stdout="Stack deployed", returncode=0)
+    configure_compose_run(mock_run, compose_file)
     result = stack_manager.deploy_stack(stack_config, [compose_file], env_file)
     assert result.status == "new"
 
@@ -331,7 +348,7 @@ def test_deploy_stack_updated(mock_run, stack_manager, stack_config, tmp_path):
     stack_manager.deployed_service_images[stack_config.name] = {
         "bazarr": "lscr.io/linuxserver/bazarr:0.9.0"
     }
-    mock_run.return_value = Mock(stdout="Stack updated", returncode=0)
+    configure_compose_run(mock_run, compose_file)
     result = stack_manager.deploy_stack(stack_config, [compose_file])
     assert result.status == "updated"
     assert result.image_changes == [
@@ -345,17 +362,23 @@ def test_deploy_stack_update_can_be_deferred(mock_run, stack_manager, stack_conf
     compose_file.write_text("services:\n  app:\n    image: example/app:2.0\n")
     stack_manager.deployed_stacks[stack_config.name] = "oldhash"
     stack_manager.deployed_service_images[stack_config.name] = {"app": "example/app:1.0"}
+    stack_manager.deployed_service_hashes[stack_config.name] = {"app": "old-service-hash"}
+    configure_compose_run(mock_run, compose_file)
 
     result = stack_manager.deploy_stack(
         stack_config,
         [compose_file],
-        update_guard=lambda name: (False, "waiting for midnight"),
+        update_guard=lambda stack, service: (False, "waiting for midnight"),
     )
 
     assert result.status == "deferred"
-    assert result.detail == "waiting for midnight"
+    assert result.detail == "app: waiting for midnight"
+    assert result.deferred_services == ["app"]
     assert stack_manager.deployed_stacks[stack_config.name] == "oldhash"
-    mock_run.assert_not_called()
+    assert not any(
+        call.args[0][:3] == ["docker", "stack", "deploy"]
+        for call in mock_run.call_args_list
+    )
 
 
 @patch('subprocess.run')
@@ -365,7 +388,7 @@ def test_deploy_stack_does_not_defer_initial_install(
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text("services:\n  app:\n    image: example/app:1.0\n")
     update_guard = Mock(return_value=(False, "active playback"))
-    mock_run.return_value = Mock(stdout="Stack deployed", returncode=0)
+    configure_compose_run(mock_run, compose_file)
 
     result = stack_manager.deploy_stack(
         stack_config,
@@ -440,6 +463,123 @@ def test_normalize_compose_data_removes_swarm_unsupported_fields(stack_manager):
     assert service["volumes"][0]["tmpfs"]["size"] == 1073741824
 
 
+def test_stack_update_deploys_only_changed_service(stack_manager, stack_config, tmp_path):
+    old_data = yaml.safe_load(
+        """services:
+  jellyfin:
+    image: example/jellyfin:1
+    environment: [MODE=stable]
+  wiki:
+    image: example/wiki:1
+    environment: [ROUTE=old]
+"""
+    )
+    new_data = yaml.safe_load(
+        """services:
+  jellyfin:
+    image: example/jellyfin:1
+    environment: [MODE=stable]
+  wiki:
+    image: example/wiki:1
+    environment: [ROUTE=new]
+"""
+    )
+    rendered = tmp_path / "rendered.yml"
+    rendered.write_text(yaml.safe_dump(new_data))
+    source = tmp_path / "source.yml"
+    source.write_text(yaml.safe_dump(new_data))
+    stack_manager.deployed_stacks[stack_config.name] = "old-stack-hash"
+    stack_manager.deployed_service_hashes[stack_config.name] = (
+        stack_manager._calculate_service_hashes(old_data)
+    )
+    stack_manager.deployed_service_images[stack_config.name] = {
+        "jellyfin": "example/jellyfin:1",
+        "wiki": "example/wiki:1",
+    }
+    deployed = {}
+
+    def capture_deploy(stack_name, compose_path, env):
+        deployed.update(yaml.safe_load(compose_path.read_text()))
+        return Mock(stdout="", stderr="", returncode=0)
+
+    guard = Mock(return_value=(True, "idle"))
+    with patch.object(
+        stack_manager, "_render_compose_file", return_value=rendered
+    ), patch.object(
+        stack_manager, "_deploy_compose", side_effect=capture_deploy
+    ), patch.object(stack_manager, "_persist_stack_state", return_value=True):
+        result = stack_manager.deploy_stack(
+            stack_config,
+            [source],
+            update_guard=guard,
+        )
+
+    assert result.status == "updated"
+    assert result.applied_services == ["wiki"]
+    assert set(deployed["services"]) == {"wiki"}
+    guard.assert_called_once_with("test-stack", "wiki")
+
+
+def test_media_service_can_defer_while_unrelated_service_deploys(
+    stack_manager, stack_config, tmp_path
+):
+    old_data = yaml.safe_load(
+        """services:
+  jellyfin:
+    image: example/jellyfin:1
+  wiki:
+    image: example/wiki:1
+"""
+    )
+    new_data = yaml.safe_load(
+        """services:
+  jellyfin:
+    image: example/jellyfin:2
+  wiki:
+    image: example/wiki:2
+"""
+    )
+    rendered = tmp_path / "rendered.yml"
+    rendered.write_text(yaml.safe_dump(new_data))
+    source = tmp_path / "source.yml"
+    source.write_text(yaml.safe_dump(new_data))
+    old_hashes = stack_manager._calculate_service_hashes(old_data)
+    new_hashes = stack_manager._calculate_service_hashes(new_data)
+    stack_manager.deployed_stacks[stack_config.name] = "old-stack-hash"
+    stack_manager.deployed_service_hashes[stack_config.name] = old_hashes
+    stack_manager.deployed_service_images[stack_config.name] = {
+        "jellyfin": "example/jellyfin:1",
+        "wiki": "example/wiki:1",
+    }
+    deployed = {}
+
+    def guard(stack_name, service_name):
+        return (False, "active stream") if service_name == "jellyfin" else (True, "idle")
+
+    def capture_deploy(stack_name, compose_path, env):
+        deployed.update(yaml.safe_load(compose_path.read_text()))
+        return Mock(stdout="", stderr="", returncode=0)
+
+    with patch.object(
+        stack_manager, "_render_compose_file", return_value=rendered
+    ), patch.object(
+        stack_manager, "_deploy_compose", side_effect=capture_deploy
+    ), patch.object(stack_manager, "_persist_stack_state", return_value=True) as persist:
+        result = stack_manager.deploy_stack(
+            stack_config,
+            [source],
+            update_guard=guard,
+        )
+
+    assert result.status == "deferred"
+    assert result.applied_services == ["wiki"]
+    assert result.deferred_services == ["jellyfin"]
+    assert set(deployed["services"]) == {"wiki"}
+    persisted_hashes = persist.call_args.args[3]
+    assert persisted_hashes["wiki"] == new_hashes["wiki"]
+    assert persisted_hashes["jellyfin"] == old_hashes["jellyfin"]
+
+
 @patch("subprocess.run")
 def test_discover_persisted_stack_state(mock_run, stack_manager):
     payload = base64.b64encode(
@@ -484,12 +624,16 @@ def test_deploy_adopts_untracked_stack_without_redeploy(
     compose_file.write_text("services:\n  app:\n    image: example/app:1.0\n")
     state = PersistedStackState(status="untracked", service_names=["test-stack_app"])
 
-    with patch.object(stack_manager, "_discover_persisted_stack_state", return_value=state), patch.object(
-        stack_manager, "_persist_stack_state", return_value=True
-    ) as persist:
+    with patch.object(
+        stack_manager, "_discover_persisted_stack_state", return_value=state
+    ), patch.object(
+        stack_manager, "_render_compose_file", return_value=compose_file
+    ), patch.object(stack_manager, "_persist_stack_state", return_value=True) as persist:
         result = stack_manager.deploy_stack(stack_config, [compose_file])
 
-    assert result == DeployResult(status="unchanged", detail="adopted existing stack")
+    assert result == DeployResult(
+        status="unchanged", detail="backfilled per-service deployment state"
+    )
     persist.assert_called_once()
     mock_run.assert_not_called()
 
@@ -517,6 +661,7 @@ def test_persist_stack_state_uses_swarm_config_without_service_update(mock_run, 
         "demo",
         "hash123",
         {"web": "example/web:1.0"},
+        {"web": "servicehash123"},
     )
 
     assert result is True

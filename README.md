@@ -98,25 +98,34 @@ openssl rand -hex 32 | docker secret create hivemind_webhook_secret -
 Polling remains as a recovery mechanism for missed deliveries. A longer value such as `3600`
 is recommended when webhooks are enabled.
 
-### Playback-aware Plex and Jellyfin updates
+### Service-scoped deployments and playback-aware media updates
 
-HiveMind can protect existing Plex and Jellyfin stacks from disruptive updates. A protected
-update is first attempted during the configured midnight window. If a configured server API
-reports that a movie or episode is playing, HiveMind retries with exponential backoff. It
-deploys as soon as playback is idle, or forcibly deploys at the scheduled time on the third
-day. New stacks are deployed immediately.
+For ordinary Compose-managed stacks, HiveMind fingerprints each rendered service separately.
+When a stack changes, it submits only new or changed services to `docker stack deploy`; services
+whose rendered definitions are unchanged are not rolled. Deleted services are removed
+individually. Custom `deploy_command` stacks remain command-scoped because HiveMind cannot
+safely split an arbitrary external deployment script.
+
+HiveMind can also protect existing Plex and Jellyfin services from disruptive updates. A
+protected service update is first attempted during the configured midnight window. If the
+corresponding server API reports that a movie or episode is playing, HiveMind retries with
+exponential backoff. Unrelated changed services in the same stack deploy immediately. The
+media service deploys as soon as playback is idle, or forcibly deploys at the scheduled time
+on the third day. New services are deployed immediately.
 
 All media-update behavior is configured with environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HIVEMIND_MEDIA_UPDATE_ENABLED` | `false` | Enable protected media-stack update scheduling |
-| `HIVEMIND_PLEX_STACKS` | `plex` | Comma-separated Plex stack names (case-insensitive) |
+| `HIVEMIND_PLEX_SERVICES` | `plex` | Comma-separated Plex service selectors: short service name, `stack_service`, or `stack/service` |
 | `HIVEMIND_PLEX_URL` | - | Plex base URL, such as `http://plex:32400` |
 | `HIVEMIND_PLEX_TOKEN` | - | Plex API token |
-| `HIVEMIND_JELLYFIN_STACKS` | `jellyfin` | Comma-separated Jellyfin stack names (case-insensitive) |
+| `HIVEMIND_PLEX_TOKEN_FILE` | - | File containing the Plex token; preferred over the environment variable |
+| `HIVEMIND_JELLYFIN_SERVICES` | `jellyfin` | Comma-separated Jellyfin service selectors: short service name, `stack_service`, or `stack/service` |
 | `HIVEMIND_JELLYFIN_URL` | - | Jellyfin base URL, such as `http://jellyfin:8096` |
 | `HIVEMIND_JELLYFIN_API_KEY` | - | Jellyfin API key |
+| `HIVEMIND_JELLYFIN_API_KEY_FILE` | - | File containing the Jellyfin API key; preferred over the environment variable |
 | `HIVEMIND_MEDIA_UPDATE_TIMEZONE` | `UTC` | IANA timezone used by the schedule |
 | `HIVEMIND_MEDIA_UPDATE_HOUR` | `0` | Scheduled deployment hour (`0` is midnight) |
 | `HIVEMIND_MEDIA_UPDATE_MINUTE` | `0` | Scheduled deployment minute |
@@ -127,7 +136,11 @@ All media-update behavior is configured with environment variables:
 | `HIVEMIND_MEDIA_API_TIMEOUT_SECONDS` | `10` | Plex/Jellyfin request timeout |
 | `HIVEMIND_MEDIA_UPDATE_STATE_FILE` | `/var/lib/hivemind/media-update-state.json` | Persistent retry-state path |
 
-If a server URL/token pair is omitted, that stack still waits for its scheduled time but skips
+The legacy `HIVEMIND_PLEX_STACKS` and `HIVEMIND_JELLYFIN_STACKS` variables remain accepted when
+the corresponding service variable is absent. A stack selector retains the legacy behavior of
+protecting the entire stack.
+
+If a server URL/token pair is omitted, that service still waits for its scheduled time but skips
 the playback check. If an API is configured but unavailable, HiveMind fails closed and backs
 off until the API succeeds or the forced-deployment deadline is reached. Persist the state-file
 directory (as the supplied Compose and Swarm manifests do) so the three-day deadline survives

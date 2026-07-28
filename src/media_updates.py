@@ -27,6 +27,18 @@ def _env_names(name: str, default: str) -> Set[str]:
     return {item.strip().casefold() for item in value.split(",") if item.strip()}
 
 
+def _credential(value_name: str, file_name: str) -> str:
+    """Read a credential from a mounted secret file, falling back to an env value."""
+    path = os.environ.get(file_name, "").strip()
+    if path:
+        try:
+            return Path(path).read_text().strip()
+        except OSError as exc:
+            logger.warning("Could not read %s: %s", file_name, exc)
+            return ""
+    return os.environ.get(value_name, "").strip()
+
+
 @dataclass(frozen=True)
 class GateDecision:
     """Whether an existing stack update may be deployed now."""
@@ -93,8 +105,8 @@ class MediaUpdateGate:
         self,
         *,
         enabled: bool,
-        plex_stacks: Set[str],
-        jellyfin_stacks: Set[str],
+        plex_services: Set[str],
+        jellyfin_services: Set[str],
         timezone: ZoneInfo,
         scheduled_hour: int,
         scheduled_minute: int,
@@ -108,8 +120,8 @@ class MediaUpdateGate:
         now: Optional[Callable[[], datetime]] = None,
     ):
         self.enabled = enabled
-        self.plex_stacks = plex_stacks
-        self.jellyfin_stacks = jellyfin_stacks
+        self.plex_services = plex_services
+        self.jellyfin_services = jellyfin_services
         self.timezone = timezone
         self.scheduled_hour = scheduled_hour
         self.scheduled_minute = scheduled_minute
@@ -150,9 +162,12 @@ class MediaUpdateGate:
             raise ValueError("Media update maximum backoff cannot be less than the base backoff")
 
         plex_url = os.environ.get("HIVEMIND_PLEX_URL", "").strip()
-        plex_token = os.environ.get("HIVEMIND_PLEX_TOKEN", "").strip()
+        plex_token = _credential("HIVEMIND_PLEX_TOKEN", "HIVEMIND_PLEX_TOKEN_FILE")
         jellyfin_url = os.environ.get("HIVEMIND_JELLYFIN_URL", "").strip()
-        jellyfin_token = os.environ.get("HIVEMIND_JELLYFIN_API_KEY", "").strip()
+        jellyfin_token = _credential(
+            "HIVEMIND_JELLYFIN_API_KEY",
+            "HIVEMIND_JELLYFIN_API_KEY_FILE",
+        )
         plex_client = (
             MediaServerClient(plex_url, plex_token, timeout)
             if plex_url and plex_token
@@ -171,8 +186,14 @@ class MediaUpdateGate:
 
         return cls(
             enabled=_env_bool("HIVEMIND_MEDIA_UPDATE_ENABLED"),
-            plex_stacks=_env_names("HIVEMIND_PLEX_STACKS", "plex"),
-            jellyfin_stacks=_env_names("HIVEMIND_JELLYFIN_STACKS", "jellyfin"),
+            plex_services=_env_names(
+                "HIVEMIND_PLEX_SERVICES",
+                os.environ.get("HIVEMIND_PLEX_STACKS", "plex"),
+            ),
+            jellyfin_services=_env_names(
+                "HIVEMIND_JELLYFIN_SERVICES",
+                os.environ.get("HIVEMIND_JELLYFIN_STACKS", "jellyfin"),
+            ),
             timezone=timezone,
             scheduled_hour=hour,
             scheduled_minute=minute,
@@ -190,24 +211,30 @@ class MediaUpdateGate:
             jellyfin_check=jellyfin_client.jellyfin_playing if jellyfin_client else None,
         )
 
-    def protects(self, stack_name: str) -> bool:
-        name = stack_name.casefold()
-        return self.enabled and name in (self.plex_stacks | self.jellyfin_stacks)
+    def protects(self, stack_name: str, service_name: Optional[str] = None) -> bool:
+        selectors = self._selectors(stack_name, service_name)
+        return self.enabled and bool(
+            selectors & (self.plex_services | self.jellyfin_services)
+        )
 
     @property
     def pending_stacks(self) -> Set[str]:
         """Return persisted deferred stacks that should be retried after restart."""
         if not self.enabled:
             return set()
-        return set(self._states)
+        return {key.split("/", 1)[0] for key in self._states}
 
-    def evaluate(self, stack_name: str) -> GateDecision:
-        """Return a deployment decision for a changed, already-deployed stack."""
-        if not self.protects(stack_name):
-            return GateDecision(True, "stack is not playback-protected")
+    def evaluate(
+        self,
+        stack_name: str,
+        service_name: Optional[str] = None,
+    ) -> GateDecision:
+        """Return a deployment decision for one changed media service."""
+        if not self.protects(stack_name, service_name):
+            return GateDecision(True, "service is not playback-protected")
 
         now = self._now().astimezone(self.timezone)
-        state_key = stack_name.casefold()
+        state_key = self._state_key(stack_name, service_name)
         state = self._states.get(state_key)
         if state is None:
             first_schedule = self._next_schedule(now)
@@ -227,14 +254,14 @@ class MediaUpdateGate:
         if now < state.next_attempt_at:
             return GateDecision(False, f"next playback check at {state.next_attempt_at.isoformat()}")
 
-        checks = self._checks_for(stack_name)
+        checks = self._checks_for(stack_name, service_name)
         if not checks:
             return GateDecision(True, "scheduled time reached; no playback API configured")
 
         try:
             playing = any(check() for check in checks)
         except Exception as exc:
-            logger.warning("Playback check failed for %s: %s", stack_name, exc)
+            logger.warning("Playback check failed for %s: %s", state_key, exc)
             return self._defer_after_attempt(
                 state, now, deadline, "playback API unavailable"
             )
@@ -245,26 +272,56 @@ class MediaUpdateGate:
             state, now, deadline, "movie or episode is playing"
         )
 
-    def clear(self, stack_name: str) -> None:
-        """Forget retry state after an update is applied or no longer needed."""
-        if self._states.pop(stack_name.casefold(), None) is not None:
+    def clear(self, stack_name: str, service_name: Optional[str] = None) -> None:
+        """Forget retry state for one service, or every service in a stack."""
+        if service_name is not None:
+            changed = self._states.pop(
+                self._state_key(stack_name, service_name), None
+            ) is not None
+        else:
+            prefix = f"{stack_name.casefold()}/"
+            stale = [key for key in self._states if key.startswith(prefix)]
+            changed = bool(stale)
+            for key in stale:
+                del self._states[key]
+        if changed:
             self._save_state()
 
     def retain(self, stack_names: Set[str]) -> None:
         """Discard retry state for stacks removed from configuration."""
         configured = {name.casefold() for name in stack_names}
-        stale = [name for name in self._states if name not in configured]
+        stale = [
+            key
+            for key in self._states
+            if key.split("/", 1)[0] not in configured
+        ]
         if stale:
             for name in stale:
                 del self._states[name]
             self._save_state()
 
-    def _checks_for(self, stack_name: str) -> List[Callable[[], bool]]:
-        name = stack_name.casefold()
+    def _selectors(self, stack_name: str, service_name: Optional[str]) -> Set[str]:
+        stack = stack_name.casefold()
+        if not service_name:
+            return {stack}
+        service = service_name.casefold()
+        return {stack, service, f"{stack}_{service}", f"{stack}/{service}"}
+
+    def _state_key(self, stack_name: str, service_name: Optional[str]) -> str:
+        stack = stack_name.casefold()
+        service = service_name.casefold() if service_name else "*"
+        return f"{stack}/{service}"
+
+    def _checks_for(
+        self,
+        stack_name: str,
+        service_name: Optional[str],
+    ) -> List[Callable[[], bool]]:
+        selectors = self._selectors(stack_name, service_name)
         checks = []
-        if name in self.plex_stacks and self.plex_check:
+        if selectors & self.plex_services and self.plex_check:
             checks.append(self.plex_check)
-        if name in self.jellyfin_stacks and self.jellyfin_check:
+        if selectors & self.jellyfin_services and self.jellyfin_check:
             checks.append(self.jellyfin_check)
         return checks
 
@@ -308,7 +365,10 @@ class MediaUpdateGate:
         try:
             payload = json.loads(self.state_file.read_text())
             for name, state in payload.get("stacks", {}).items():
-                self._states[name.casefold()] = DeferredUpdate(
+                key = name.casefold()
+                if "/" not in key:
+                    key = f"{key}/{key}"
+                self._states[key] = DeferredUpdate(
                     first_scheduled_at=datetime.fromisoformat(state["first_scheduled_at"]),
                     next_attempt_at=datetime.fromisoformat(state["next_attempt_at"]),
                     failures=int(state.get("failures", 0)),
@@ -319,7 +379,7 @@ class MediaUpdateGate:
 
     def _save_state(self) -> None:
         payload = {
-            "version": 1,
+            "version": 2,
             "stacks": {
                 name: {
                     "first_scheduled_at": state.first_scheduled_at.isoformat(),
