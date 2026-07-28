@@ -126,6 +126,7 @@ class SwarmStackManager:
                     return DeployResult(status="failed", detail=persisted.detail)
 
             if stack.name in self.deployed_stacks:
+                status = "updated"
                 previous_hash = self.deployed_stacks[stack.name]
                 previous_images = self.deployed_service_images.get(stack.name, {})
                 logger.debug(f"Previous hash: {previous_hash[:16]}...")

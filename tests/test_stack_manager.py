@@ -638,6 +638,37 @@ def test_deploy_adopts_untracked_stack_without_redeploy(
     mock_run.assert_not_called()
 
 
+def test_version_one_state_backfills_hashes_without_redeploy(
+    stack_manager, stack_config, tmp_path
+):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  app:\n    image: example/app:1.0\n")
+    stack_hash = stack_manager._calculate_stack_hash([compose_file], None)
+    state = PersistedStackState(
+        status="tracked",
+        stack_hash=stack_hash,
+        service_images={"app": "example/app:1.0"},
+        service_hashes={},
+    )
+
+    with patch.object(
+        stack_manager, "_discover_persisted_stack_state", return_value=state
+    ), patch.object(
+        stack_manager, "_render_compose_file", return_value=compose_file
+    ), patch.object(
+        stack_manager, "_deploy_compose"
+    ) as deploy, patch.object(
+        stack_manager, "_persist_stack_state", return_value=True
+    ) as persist:
+        result = stack_manager.deploy_stack(stack_config, [compose_file])
+
+    assert result == DeployResult(
+        status="unchanged", detail="backfilled per-service deployment state"
+    )
+    deploy.assert_not_called()
+    assert persist.call_args.args[3]["app"]
+
+
 @patch("subprocess.run")
 def test_deploy_fails_closed_when_state_discovery_fails(
     mock_run, stack_manager, stack_config, tmp_path
