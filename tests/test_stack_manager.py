@@ -665,6 +665,13 @@ def test_discover_persisted_stack_state(mock_run, stack_manager):
     mock_run.side_effect = [
         Mock(stdout="demo\n", returncode=0),
         Mock(stdout="demo_web\ndemo_worker\n", returncode=0),
+        Mock(
+            stdout=(
+                '{"TaskTemplate":{"ContainerSpec":{"Image":"example/web:1.0"}}}\n'
+                '{"TaskTemplate":{"ContainerSpec":{"Image":"example/worker:1.0"}}}\n'
+            ),
+            returncode=0,
+        ),
         Mock(stdout="hivemind-state-demo\n", returncode=0),
         Mock(stdout=json.dumps(configs), returncode=0),
     ]
@@ -674,6 +681,10 @@ def test_discover_persisted_stack_state(mock_run, stack_manager):
     assert state.status == "tracked"
     assert state.stack_hash == "hash123"
     assert state.service_images == {
+        "web": "example/web:1.0",
+        "worker": "example/worker:1.0",
+    }
+    assert state.live_service_images == {
         "web": "example/web:1.0",
         "worker": "example/worker:1.0",
     }
@@ -711,6 +722,7 @@ def test_version_one_state_backfills_hashes_without_redeploy(
         status="tracked",
         stack_hash=stack_hash,
         service_images={"app": "example/app:1.0"},
+        live_service_images={"app": "example/app:1.0"},
         service_hashes={},
     )
 
@@ -730,6 +742,18 @@ def test_version_one_state_backfills_hashes_without_redeploy(
     )
     deploy.assert_not_called()
     assert persist.call_args.args[3]["app"]
+
+
+def test_image_map_normalizes_docker_hub_aliases(stack_manager):
+    assert stack_manager._normalize_image_map(
+        {
+            "runner": "docker.io/gitea/act_runner:0.6.1@sha256:abc",
+            "cli": "docker.io/library/docker:29-cli@sha256:def",
+        }
+    ) == {
+        "runner": "gitea/act_runner:0.6.1@sha256:abc",
+        "cli": "docker:29-cli@sha256:def",
+    }
 
 
 @patch("subprocess.run")

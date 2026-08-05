@@ -21,6 +21,7 @@ STACK_HASH_LABEL = "io.nicholstech.hivemind.stack-hash"
 STATE_LABEL = "io.nicholstech.hivemind.state"
 STATE_STACK_LABEL = "io.nicholstech.hivemind.stack"
 STATE_CONFIG_PREFIX = "hivemind-state"
+SERVICE_HASH_VERSION = 2
 
 
 @dataclass
@@ -57,7 +58,9 @@ class PersistedStackState:
     service_names: List[str] = field(default_factory=list)
     stack_hash: Optional[str] = None
     service_images: Dict[str, str] = field(default_factory=dict)
+    live_service_images: Dict[str, str] = field(default_factory=dict)
     service_hashes: Dict[str, str] = field(default_factory=dict)
+    service_hash_version: int = 1
     detail: Optional[str] = None
 
 
@@ -99,9 +102,50 @@ class SwarmStackManager:
             if stack.name not in self.deployed_stacks:
                 persisted = self._discover_persisted_stack_state(stack.name)
                 if persisted.status == "tracked":
-                    self.deployed_stacks[stack.name] = persisted.stack_hash or ""
-                    self.deployed_service_images[stack.name] = persisted.service_images
-                    self.deployed_service_hashes[stack.name] = persisted.service_hashes
+                    if persisted.service_hash_version != SERVICE_HASH_VERSION:
+                        live_images = self._normalize_image_map(
+                            persisted.live_service_images
+                        )
+                        desired_images = self._normalize_image_map(service_images)
+                        if live_images != desired_images:
+                            detail = (
+                                f"Refusing fingerprint migration for {stack.name}: "
+                                "live service images do not match the desired images"
+                            )
+                            logger.error(detail)
+                            return DeployResult(status="failed", detail=detail)
+                        logger.warning(
+                            "Migrating service fingerprints for stack %s from version %d "
+                            "to version %d without updating service specs",
+                            stack.name,
+                            persisted.service_hash_version,
+                            SERVICE_HASH_VERSION,
+                        )
+                        self.deployed_stacks[stack.name] = compose_hash
+                        self.deployed_service_images[stack.name] = service_images
+                        self.deployed_service_hashes[stack.name] = {}
+                        if stack.deploy_command:
+                            if not self._persist_stack_state(
+                                stack.name,
+                                compose_hash,
+                                service_images,
+                                {},
+                            ):
+                                return DeployResult(
+                                    status="failed",
+                                    detail=(
+                                        "Failed to persist migrated service state for "
+                                        f"{stack.name}"
+                                    ),
+                                )
+                            return DeployResult(
+                                status="unchanged",
+                                detail="migrated service fingerprint state",
+                            )
+                    else:
+                        self.deployed_stacks[stack.name] = persisted.stack_hash or ""
+                        self.deployed_service_images[stack.name] = persisted.service_images
+                        self.deployed_service_hashes[stack.name] = persisted.service_hashes
                     logger.info(
                         "Restored deployment state for stack %s from a Swarm config",
                         stack.name,
@@ -688,6 +732,17 @@ class SwarmStackManager:
             and service["image"]
         }
 
+    def _normalize_image_map(self, images: Dict[str, str]) -> Dict[str, str]:
+        """Normalize Docker Hub aliases before comparing live and desired images."""
+        normalized: Dict[str, str] = {}
+        for service_name, image in images.items():
+            if image.startswith("docker.io/library/"):
+                image = image[len("docker.io/library/") :]
+            elif image.startswith("docker.io/"):
+                image = image[len("docker.io/") :]
+            normalized[service_name] = image
+        return normalized
+
     def _write_partial_compose(
         self,
         stack_name: str,
@@ -782,6 +837,42 @@ class SwarmStackManager:
                     detail=f"Existing stack {stack_name} has no discoverable services",
                 )
 
+            inspect_result = subprocess.run(
+                [
+                    "docker",
+                    "service",
+                    "inspect",
+                    "--format",
+                    "{{json .Spec}}",
+                    *service_names,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            specs = [json.loads(line) for line in inspect_result.stdout.splitlines() if line]
+            if len(specs) != len(service_names):
+                return PersistedStackState(
+                    status="error",
+                    service_names=service_names,
+                    detail=(
+                        f"Expected {len(service_names)} service specs for {stack_name}, "
+                        f"received {len(specs)}"
+                    ),
+                )
+
+            live_images: Dict[str, str] = {}
+            prefix = f"{stack_name}_"
+            for service_name, spec in zip(service_names, specs):
+                short_name = (
+                    service_name[len(prefix):]
+                    if service_name.startswith(prefix)
+                    else service_name
+                )
+                image = spec.get("TaskTemplate", {}).get("ContainerSpec", {}).get("Image")
+                if image:
+                    live_images[short_name] = image
+
             configs_result = subprocess.run(
                 [
                     "docker",
@@ -803,49 +894,11 @@ class SwarmStackManager:
             ]
 
             if not config_names:
-                inspect_result = subprocess.run(
-                    [
-                        "docker",
-                        "service",
-                        "inspect",
-                        "--format",
-                        "{{json .Spec}}",
-                        *service_names,
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                specs = [json.loads(line) for line in inspect_result.stdout.splitlines() if line]
-                if len(specs) != len(service_names):
-                    return PersistedStackState(
-                        status="error",
-                        service_names=service_names,
-                        detail=(
-                            f"Expected {len(service_names)} service specs for {stack_name}, "
-                            f"received {len(specs)}"
-                        ),
-                    )
-
-                images: Dict[str, str] = {}
-                prefix = f"{stack_name}_"
-                for service_name, spec in zip(service_names, specs):
-                    short_name = (
-                        service_name[len(prefix):]
-                        if service_name.startswith(prefix)
-                        else service_name
-                    )
-                    image = (
-                        spec.get("TaskTemplate", {})
-                        .get("ContainerSpec", {})
-                        .get("Image")
-                    )
-                    if image:
-                        images[short_name] = image
                 return PersistedStackState(
                     status="untracked",
                     service_names=service_names,
-                    service_images=images,
+                    service_images=live_images,
+                    live_service_images=live_images,
                 )
 
             inspect_result = subprocess.run(
@@ -882,12 +935,19 @@ class SwarmStackManager:
             service_hashes = payload.get("service_hashes") or {}
             if not isinstance(service_hashes, dict):
                 raise ValueError(f"Invalid service_hashes in state config for {stack_name}")
+            service_hash_version = payload.get("service_hash_version", 1)
+            if not isinstance(service_hash_version, int):
+                raise ValueError(
+                    f"Invalid service_hash_version in state config for {stack_name}"
+                )
             return PersistedStackState(
                 status="tracked",
                 service_names=service_names,
                 stack_hash=stack_hash,
                 service_images=images,
+                live_service_images=live_images,
                 service_hashes=service_hashes,
+                service_hash_version=service_hash_version,
             )
         except (subprocess.CalledProcessError, json.JSONDecodeError, ValueError) as exc:
             logger.error("Failed to discover persisted state for stack %s: %s", stack_name, exc)
@@ -935,6 +995,7 @@ class SwarmStackManager:
             payload = json.dumps(
                 {
                     "version": 2,
+                    "service_hash_version": SERVICE_HASH_VERSION,
                     "service_images": service_images,
                     "service_hashes": service_hashes,
                 },
