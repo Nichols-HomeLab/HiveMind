@@ -308,6 +308,32 @@ def test_custom_command_changes_stack_hash(stack_manager, tmp_path):
     assert guarded_hash != default_hash
 
 
+@patch("subprocess.run")
+def test_changed_custom_command_stack_fails_closed(mock_run, stack_manager, tmp_path):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  db:\n    image: mariadb:latest\n")
+    stack_config = StackConfig(
+        name="databases",
+        compose_file="compose.yml",
+        deploy_command=["scripts/deploy-stack.sh", "databases"],
+    )
+    stack_manager.deployed_stacks["databases"] = "previous-stack-hash"
+    stack_manager.deployed_service_images["databases"] = {"db": "mariadb:latest"}
+
+    result = stack_manager.deploy_stack(
+        stack_config,
+        [compose_file],
+        working_directory=tmp_path,
+    )
+
+    assert result.status == "failed"
+    assert "stack-scoped" in result.detail
+    assert not any(
+        call.args[0] == ["scripts/deploy-stack.sh", "databases"]
+        for call in mock_run.call_args_list
+    )
+
+
 @patch('subprocess.run')
 def test_deploy_stack_with_sops_env_file(mock_run, stack_manager, stack_config, tmp_path):
     """Test stack deployment with SOPS encrypted environment file"""

@@ -164,6 +164,14 @@ class SwarmStackManager:
             try:
                 result = None
                 if stack.deploy_command:
+                    if status == "updated":
+                        detail = (
+                            f"Refusing automatic update for {stack.name}: its custom "
+                            "deploy command is stack-scoped and cannot prove that only "
+                            "changed services will be updated"
+                        )
+                        logger.error(detail)
+                        return DeployResult(status="failed", detail=detail)
                     if status == "updated" and update_guard:
                         allowed, detail = update_guard(stack.name, None)
                         if not allowed:
