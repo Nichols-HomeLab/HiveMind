@@ -1003,6 +1003,15 @@ class SwarmStackManager:
                     continue
                 service.pop("group_add", None)
                 service.pop("depends_on", None)
+                resources = service.get("deploy", {}).get("resources", {})
+                if isinstance(resources, dict):
+                    for resource_class in ("limits", "reservations"):
+                        resource_values = resources.get(resource_class, {})
+                        if not isinstance(resource_values, dict):
+                            continue
+                        cpus = resource_values.get("cpus")
+                        if isinstance(cpus, (int, float)):
+                            resource_values["cpus"] = str(cpus)
                 for port in service.get("ports", []) or []:
                     if not isinstance(port, dict):
                         continue

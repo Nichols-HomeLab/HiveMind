@@ -437,6 +437,12 @@ def test_normalize_compose_data_removes_swarm_unsupported_fields(stack_manager):
                 "image": "example/app:latest",
                 "group_add": ["44"],
                 "depends_on": {"db": {"condition": "service_started"}},
+                "deploy": {
+                    "resources": {
+                        "limits": {"cpus": 1.0, "memory": "1G"},
+                        "reservations": {"cpus": 0.25, "memory": "256M"},
+                    }
+                },
                 "ports": [{"target": "8080", "published": "80"}],
                 "secrets": [{"source": "secret", "target": "/secret", "mode": "0440"}],
                 "configs": [{"source": "config", "target": "/config", "mode": "292"}],
@@ -457,6 +463,8 @@ def test_normalize_compose_data_removes_swarm_unsupported_fields(stack_manager):
     service = normalized["services"]["app"]
     assert "group_add" not in service
     assert "depends_on" not in service
+    assert service["deploy"]["resources"]["limits"]["cpus"] == "1.0"
+    assert service["deploy"]["resources"]["reservations"]["cpus"] == "0.25"
     assert service["ports"] == [{"target": 8080, "published": 80}]
     assert service["secrets"][0]["mode"] == 0o440
     assert service["configs"][0]["mode"] == 292
