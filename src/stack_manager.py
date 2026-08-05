@@ -9,6 +9,7 @@ import logging
 import time
 import yaml
 import codecs
+import copy
 import tempfile
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -193,6 +194,10 @@ class SwarmStackManager:
                     )
                     rendered_data = yaml.safe_load(rendered_compose.read_text()) or {}
                     service_hashes = self._calculate_service_hashes(rendered_data)
+                    compatible_service_hashes = self._calculate_service_hashes(
+                        rendered_data,
+                        canonicalize_cpus=False,
+                    )
                     service_images = self._extract_rendered_service_images(rendered_data)
 
                     previous_hashes = self.deployed_service_hashes.get(stack.name, {})
@@ -235,7 +240,8 @@ class SwarmStackManager:
                         changed_services = {
                             name
                             for name, fingerprint in service_hashes.items()
-                            if previous_hashes.get(name) != fingerprint
+                            if previous_hashes.get(name)
+                            not in {fingerprint, compatible_service_hashes.get(name)}
                         }
                         removed_services = set(previous_hashes) - set(service_hashes)
 
@@ -576,7 +582,12 @@ class SwarmStackManager:
             yaml.safe_dump(rendered, handle, sort_keys=False)
         return Path(handle.name)
 
-    def _calculate_service_hashes(self, compose_data: dict) -> Dict[str, str]:
+    def _calculate_service_hashes(
+        self,
+        compose_data: dict,
+        *,
+        canonicalize_cpus: bool = True,
+    ) -> Dict[str, str]:
         """Fingerprint each rendered service and the top-level resources it uses."""
         services = compose_data.get("services") or {}
         if not isinstance(services, dict):
@@ -586,8 +597,22 @@ class SwarmStackManager:
         for service_name, service in services.items():
             if not isinstance(service, dict):
                 continue
+            service_payload = copy.deepcopy(service)
+            if canonicalize_cpus:
+                resources = service_payload.get("deploy", {}).get("resources", {})
+                if isinstance(resources, dict):
+                    for resource_class in ("limits", "reservations"):
+                        resource_values = resources.get(resource_class, {})
+                        if not isinstance(resource_values, dict):
+                            continue
+                        cpus = resource_values.get("cpus")
+                        if isinstance(cpus, str):
+                            try:
+                                resource_values["cpus"] = float(cpus)
+                            except ValueError:
+                                pass
             payload = {
-                "service": service,
+                "service": service_payload,
                 "resources": self._referenced_resources(compose_data, service),
             }
             canonical = json.dumps(

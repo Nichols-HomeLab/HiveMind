@@ -1,6 +1,7 @@
 """Tests for stack_manager module"""
 
 import base64
+import copy
 import json
 import pytest
 import yaml
@@ -526,6 +527,34 @@ def test_stack_update_deploys_only_changed_service(stack_manager, stack_config, 
     assert result.applied_services == ["wiki"]
     assert set(deployed["services"]) == {"wiki"}
     guard.assert_called_once_with("test-stack", "wiki")
+
+
+def test_service_hash_treats_numeric_and_string_cpu_values_as_equivalent(stack_manager):
+    numeric = {
+        "services": {
+            "app": {
+                "image": "example/app:1",
+                "deploy": {
+                    "resources": {
+                        "limits": {"cpus": 1.0},
+                        "reservations": {"cpus": 0.25},
+                    }
+                },
+            }
+        }
+    }
+    string = copy.deepcopy(numeric)
+    string_resources = string["services"]["app"]["deploy"]["resources"]
+    string_resources["limits"]["cpus"] = "1.0"
+    string_resources["reservations"]["cpus"] = "0.25"
+
+    assert stack_manager._calculate_service_hashes(numeric) == (
+        stack_manager._calculate_service_hashes(string)
+    )
+    assert stack_manager._calculate_service_hashes(
+        string,
+        canonicalize_cpus=False,
+    ) != stack_manager._calculate_service_hashes(string)
 
 
 def test_media_service_can_defer_while_unrelated_service_deploys(
