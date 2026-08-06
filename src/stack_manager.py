@@ -102,6 +102,25 @@ class SwarmStackManager:
 
             if stack.name not in self.deployed_stacks:
                 persisted = self._discover_persisted_stack_state(stack.name)
+                if stack.adopt_state and persisted.status != "tracked":
+                    detail = (
+                        f"Refusing state adoption for {stack.name}: persisted state is "
+                        f"{persisted.status}; adoption requires an existing tracked baseline"
+                    )
+                    if persisted.detail:
+                        detail = f"{detail}: {persisted.detail}"
+                    logger.error(detail)
+                    return DeployResult(status="failed", detail=detail)
+                if (
+                    stack.adopt_state
+                    and persisted.service_hash_version != SERVICE_HASH_VERSION
+                ):
+                    detail = (
+                        f"Refusing state adoption for {stack.name}: persisted state version "
+                        f"{persisted.service_hash_version} is not {SERVICE_HASH_VERSION}"
+                    )
+                    logger.error(detail)
+                    return DeployResult(status="failed", detail=detail)
                 if persisted.status == "tracked":
                     if persisted.service_hash_version != SERVICE_HASH_VERSION:
                         live_images = self._normalize_image_map(
@@ -188,24 +207,6 @@ class SwarmStackManager:
                     image_changes = self._describe_image_changes(
                         stack.name, previous_images, service_images
                     )
-                    if stack.deploy_command:
-                        if stack.adopt_state:
-                            return self._adopt_custom_stack_state(
-                                stack,
-                                compose_hash,
-                                previous_hash,
-                                service_images,
-                            )
-                        detail = (
-                            f"Refusing automatic update for {stack.name}: its custom "
-                            "deploy command is stack-scoped and cannot prove that only "
-                            f"changed services will be updated. Persisted state hash: "
-                            f"{previous_hash}. Desired state hash: {compose_hash}. After "
-                            "manually applying and verifying the exact desired state, set "
-                            "adopt_state.from_hash and adopt_state.to_hash to those values"
-                        )
-                        logger.error(detail)
-                        return DeployResult(status="failed", detail=detail)
             else:
                 logger.info(f"Stack {stack.name} is new, deploying")
                 image_changes = self._describe_new_services(stack.name, service_images)
@@ -220,6 +221,8 @@ class SwarmStackManager:
                     logger.debug(f"Loaded {len(env)} environment variables")
                 except Exception as e:
                     logger.error(f"Failed to load environment file: {e}", exc_info=True)
+                    if stack.adopt_state:
+                        raise
                     logger.warning("Continuing deployment without environment file")
             elif env_file:
                 logger.warning(f"Environment file specified but not found: {env_file}")
@@ -227,6 +230,25 @@ class SwarmStackManager:
             try:
                 result = None
                 if stack.deploy_command:
+                    if status == "updated":
+                        if stack.adopt_state:
+                            return self._adopt_custom_stack_state(
+                                stack,
+                                compose_hash,
+                                previous_hash,
+                                compose_paths,
+                                env,
+                            )
+                        detail = (
+                            f"Refusing automatic update for {stack.name}: its custom "
+                            "deploy command is stack-scoped and cannot prove that only "
+                            f"changed services will be updated. Persisted state hash: "
+                            f"{previous_hash}. Desired state hash: {compose_hash}. After "
+                            "manually applying and verifying the exact desired state, set "
+                            "adopt_state.from_hash and adopt_state.to_hash to those values"
+                        )
+                        logger.error(detail)
+                        return DeployResult(status="failed", detail=detail)
                     if status == "updated" and update_guard:
                         allowed, detail = update_guard(stack.name, None)
                         if not allowed:
@@ -427,7 +449,8 @@ class SwarmStackManager:
         stack: StackConfig,
         compose_hash: str,
         previous_hash: str,
-        service_images: Dict[str, str],
+        compose_paths: List[Path],
+        env: Optional[dict],
     ) -> DeployResult:
         """Adopt an explicitly verified custom stack without changing service specs."""
         adopt_state = stack.adopt_state or {}
@@ -471,17 +494,16 @@ class SwarmStackManager:
             logger.error(detail)
             return DeployResult(status="failed", detail=detail)
 
-        converged, convergence_detail = self._custom_stack_services_converged(
-            stack.name,
-            persisted.service_names,
-        )
-        if not converged:
-            detail = (
-                f"Refusing state adoption for {stack.name}: live services are not "
-                f"converged: {convergence_detail}"
-            )
-            logger.error(detail)
-            return DeployResult(status="failed", detail=detail)
+        rendered_compose = self._render_compose_file(stack.name, compose_paths, env)
+        try:
+            rendered_data = yaml.safe_load(rendered_compose.read_text()) or {}
+            service_images = self._extract_rendered_service_images(rendered_data)
+            desired_service_names = [
+                f"{stack.name}_{service_name}"
+                for service_name in (rendered_data.get("services") or {})
+            ]
+        finally:
+            rendered_compose.unlink(missing_ok=True)
 
         live_images = self._normalize_image_map(persisted.live_service_images)
         desired_images = self._normalize_image_map(service_images)
@@ -489,6 +511,18 @@ class SwarmStackManager:
             detail = (
                 f"Refusing state adoption for {stack.name}: live service images do not "
                 "match the desired images"
+            )
+            logger.error(detail)
+            return DeployResult(status="failed", detail=detail)
+
+        converged, convergence_detail = self._custom_stack_services_converged(
+            stack.name,
+            desired_service_names,
+        )
+        if not converged:
+            detail = (
+                f"Refusing state adoption for {stack.name}: live services are not "
+                f"converged: {convergence_detail}"
             )
             logger.error(detail)
             return DeployResult(status="failed", detail=detail)

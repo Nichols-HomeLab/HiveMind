@@ -338,12 +338,89 @@ def test_changed_custom_command_stack_fails_closed(mock_run, stack_manager, tmp_
     )
 
 
+@pytest.mark.parametrize("persisted_status", ["absent", "untracked"])
+@patch("subprocess.run")
+def test_custom_stack_adoption_requires_existing_tracked_state(
+    mock_run, stack_manager, tmp_path, persisted_status
+):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  db:\n    image: mariadb:11\n")
+    desired_hash = stack_manager._calculate_stack_hash(
+        [compose_file],
+        None,
+        ["scripts/deploy-stack.sh", "databases"],
+    )
+    stack_config = StackConfig(
+        name="databases",
+        compose_file="compose.yml",
+        deploy_command=["scripts/deploy-stack.sh", "databases"],
+        adopt_state={"from_hash": "1" * 64, "to_hash": desired_hash},
+    )
+    persisted = PersistedStackState(
+        status=persisted_status,
+        service_names=["databases_db"] if persisted_status == "untracked" else [],
+        live_service_images={"db": "mariadb:11"},
+    )
+
+    with patch.object(
+        stack_manager, "_discover_persisted_stack_state", return_value=persisted
+    ), patch.object(stack_manager, "_persist_stack_state") as persist:
+        result = stack_manager.deploy_stack(
+            stack_config,
+            [compose_file],
+            working_directory=tmp_path,
+        )
+
+    assert result.status == "failed"
+    assert f"persisted state is {persisted_status}" in result.detail
+    persist.assert_not_called()
+    mock_run.assert_not_called()
+
+
+@patch("subprocess.run")
+def test_custom_stack_adoption_requires_current_state_version(
+    mock_run, stack_manager, tmp_path
+):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  db:\n    image: mariadb:11\n")
+    desired_hash = stack_manager._calculate_stack_hash(
+        [compose_file],
+        None,
+        ["scripts/deploy-stack.sh", "databases"],
+    )
+    stack_config = StackConfig(
+        name="databases",
+        compose_file="compose.yml",
+        deploy_command=["scripts/deploy-stack.sh", "databases"],
+        adopt_state={"from_hash": "1" * 64, "to_hash": desired_hash},
+    )
+    persisted = PersistedStackState(
+        status="tracked",
+        stack_hash="1" * 64,
+        service_names=["databases_db"],
+        live_service_images={"db": "mariadb:11"},
+        service_hash_version=1,
+    )
+
+    with patch.object(
+        stack_manager, "_discover_persisted_stack_state", return_value=persisted
+    ), patch.object(stack_manager, "_persist_stack_state") as persist:
+        result = stack_manager.deploy_stack(stack_config, [compose_file])
+
+    assert result.status == "failed"
+    assert "persisted state version 1 is not" in result.detail
+    persist.assert_not_called()
+    mock_run.assert_not_called()
+
+
 @patch("subprocess.run")
 def test_changed_custom_stack_adopts_pinned_verified_state_without_deploy(
     mock_run, stack_manager, tmp_path
 ):
     compose_file = tmp_path / "compose.yml"
-    compose_file.write_text("services:\n  db:\n    image: mariadb:11\n")
+    compose_file.write_text("services:\n  db:\n    image: ${DB_IMAGE}\n")
+    rendered_file = tmp_path / "rendered.yml"
+    rendered_file.write_text("services:\n  db:\n    image: mariadb:11\n")
     previous_hash = "1" * 64
     desired_hash = stack_manager._calculate_stack_hash(
         [compose_file],
@@ -371,6 +448,8 @@ def test_changed_custom_stack_adopts_pinned_verified_state_without_deploy(
     with patch.object(
         stack_manager, "_discover_persisted_stack_state", return_value=persisted
     ), patch.object(
+        stack_manager, "_render_compose_file", return_value=rendered_file
+    ), patch.object(
         stack_manager,
         "_custom_stack_services_converged",
         return_value=(True, "all services match desired replicas"),
@@ -378,6 +457,11 @@ def test_changed_custom_stack_adopts_pinned_verified_state_without_deploy(
         stack_manager, "_persist_stack_state", return_value=True
     ) as persist:
         result = stack_manager.deploy_stack(
+            stack_config,
+            [compose_file],
+            working_directory=tmp_path,
+        )
+        second_result = stack_manager.deploy_stack(
             stack_config,
             [compose_file],
             working_directory=tmp_path,
@@ -391,7 +475,60 @@ def test_changed_custom_stack_adopts_pinned_verified_state_without_deploy(
         "databases", desired_hash, {"db": "mariadb:11"}, {}
     )
     assert stack_manager.deployed_stacks["databases"] == desired_hash
+    assert second_result == DeployResult(status="unchanged")
     mock_run.assert_not_called()
+
+
+def test_custom_stack_adoption_persistence_failure_keeps_previous_cache(
+    stack_manager, tmp_path
+):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  db:\n    image: mariadb:11\n")
+    rendered_file = tmp_path / "rendered.yml"
+    rendered_file.write_text("services:\n  db:\n    image: mariadb:11\n")
+    previous_hash = "1" * 64
+    desired_hash = stack_manager._calculate_stack_hash(
+        [compose_file],
+        None,
+        ["scripts/deploy-stack.sh", "databases"],
+    )
+    stack_config = StackConfig(
+        name="databases",
+        compose_file="compose.yml",
+        deploy_command=["scripts/deploy-stack.sh", "databases"],
+        adopt_state={"from_hash": previous_hash, "to_hash": desired_hash},
+    )
+    old_images = {"db": "mariadb:10"}
+    old_hashes = {"db": "old-service-hash"}
+    stack_manager.deployed_stacks["databases"] = previous_hash
+    stack_manager.deployed_service_images["databases"] = old_images.copy()
+    stack_manager.deployed_service_hashes["databases"] = old_hashes.copy()
+    persisted = PersistedStackState(
+        status="tracked",
+        service_names=["databases_db"],
+        stack_hash=previous_hash,
+        service_images=old_images,
+        live_service_images={"db": "mariadb:11"},
+        service_hash_version=SERVICE_HASH_VERSION,
+    )
+
+    with patch.object(
+        stack_manager, "_discover_persisted_stack_state", return_value=persisted
+    ), patch.object(
+        stack_manager, "_render_compose_file", return_value=rendered_file
+    ), patch.object(
+        stack_manager,
+        "_custom_stack_services_converged",
+        return_value=(True, "all services match desired replicas"),
+    ), patch.object(stack_manager, "_persist_stack_state", return_value=False):
+        result = stack_manager.deploy_stack(stack_config, [compose_file])
+
+    assert result == DeployResult(
+        status="failed", detail="Failed to persist adopted state for databases"
+    )
+    assert stack_manager.deployed_stacks["databases"] == previous_hash
+    assert stack_manager.deployed_service_images["databases"] == old_images
+    assert stack_manager.deployed_service_hashes["databases"] == old_hashes
 
 
 @pytest.mark.parametrize(
@@ -432,9 +569,48 @@ def test_changed_custom_stack_rejects_stale_adoption_hashes(
     persist.assert_not_called()
 
 
+def test_changed_custom_stack_rejects_concurrent_persisted_state_change(
+    stack_manager, tmp_path
+):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  db:\n    image: mariadb:11\n")
+    previous_hash = "1" * 64
+    desired_hash = stack_manager._calculate_stack_hash(
+        [compose_file],
+        None,
+        ["scripts/deploy-stack.sh", "databases"],
+    )
+    stack_config = StackConfig(
+        name="databases",
+        compose_file="compose.yml",
+        deploy_command=["scripts/deploy-stack.sh", "databases"],
+        adopt_state={"from_hash": previous_hash, "to_hash": desired_hash},
+    )
+    stack_manager.deployed_stacks["databases"] = previous_hash
+    stack_manager.deployed_service_images["databases"] = {"db": "mariadb:11"}
+    persisted = PersistedStackState(
+        status="tracked",
+        stack_hash="2" * 64,
+        service_names=["databases_db"],
+        live_service_images={"db": "mariadb:11"},
+        service_hash_version=SERVICE_HASH_VERSION,
+    )
+
+    with patch.object(
+        stack_manager, "_discover_persisted_stack_state", return_value=persisted
+    ), patch.object(stack_manager, "_persist_stack_state") as persist:
+        result = stack_manager.deploy_stack(stack_config, [compose_file])
+
+    assert result.status == "failed"
+    assert "persisted state changed during reconciliation" in result.detail
+    persist.assert_not_called()
+
+
 def test_changed_custom_stack_rejects_live_image_mismatch(stack_manager, tmp_path):
     compose_file = tmp_path / "compose.yml"
     compose_file.write_text("services:\n  db:\n    image: mariadb:11\n")
+    rendered_file = tmp_path / "rendered.yml"
+    rendered_file.write_text("services:\n  db:\n    image: mariadb:11\n")
     previous_hash = "1" * 64
     desired_hash = stack_manager._calculate_stack_hash(
         [compose_file],
@@ -460,6 +636,8 @@ def test_changed_custom_stack_rejects_live_image_mismatch(stack_manager, tmp_pat
 
     with patch.object(
         stack_manager, "_discover_persisted_stack_state", return_value=persisted
+    ), patch.object(
+        stack_manager, "_render_compose_file", return_value=rendered_file
     ), patch.object(
         stack_manager,
         "_custom_stack_services_converged",
@@ -488,6 +666,25 @@ def test_custom_stack_convergence_requires_exact_service_set_and_replicas(
 
     assert converged is False
     assert detail == "databases_replica=0/1"
+
+
+@patch("subprocess.run")
+def test_custom_stack_convergence_rejects_missing_and_extra_services(
+    mock_run, stack_manager
+):
+    mock_run.return_value = Mock(
+        stdout="databases_db|1/1\ndatabases_extra|1/1\n",
+        returncode=0,
+    )
+
+    converged, detail = stack_manager._custom_stack_services_converged(
+        "databases",
+        ["databases_db", "databases_replica"],
+    )
+
+    assert converged is False
+    assert "missing=['databases_replica']" in detail
+    assert "extra=['databases_extra']" in detail
 
 
 @patch('subprocess.run')
