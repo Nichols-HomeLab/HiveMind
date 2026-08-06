@@ -4,6 +4,7 @@ import yaml
 import logging
 import tempfile
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Dict, List
@@ -128,6 +129,27 @@ class HiveMind:
                     or not all(isinstance(argument, str) and argument for argument in deploy_command)
                 ):
                     raise ValueError("deploy_command must be a non-empty list of strings")
+                adopt_state = stack_data.get("adopt_state")
+                if adopt_state is not None:
+                    if deploy_command is None:
+                        raise ValueError(
+                            "adopt_state requires a custom deploy_command"
+                        )
+                    if not isinstance(adopt_state, dict) or set(adopt_state) != {
+                        "from_hash",
+                        "to_hash",
+                    }:
+                        raise ValueError(
+                            "adopt_state must contain only from_hash and to_hash"
+                        )
+                    if not all(
+                        isinstance(value, str)
+                        and re.fullmatch(r"[0-9a-f]{64}", value)
+                        for value in adopt_state.values()
+                    ):
+                        raise ValueError(
+                            "adopt_state hashes must be lowercase SHA-256 values"
+                        )
                 stack = StackConfig(**stack_data)
                 stacks.append(stack)
                 logger.debug(f"Loaded stack configuration: {stack.name}")

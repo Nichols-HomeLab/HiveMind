@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch, mock_open
 from src.stack_manager import (
     DeployResult,
     PersistedStackState,
+    SERVICE_HASH_VERSION,
     STACK_HASH_LABEL,
     STATE_LABEL,
     STATE_STACK_LABEL,
@@ -57,6 +58,7 @@ def test_stack_config_creation():
     assert config.compose_file == "compose.yml"
     assert config.enabled is True
     assert config.env_file is None
+    assert config.adopt_state is None
 
 
 def test_stack_manager_initialization(stack_manager):
@@ -328,10 +330,164 @@ def test_changed_custom_command_stack_fails_closed(mock_run, stack_manager, tmp_
 
     assert result.status == "failed"
     assert "stack-scoped" in result.detail
+    assert "Persisted state hash: previous-stack-hash" in result.detail
+    assert "Desired state hash:" in result.detail
     assert not any(
         call.args[0] == ["scripts/deploy-stack.sh", "databases"]
         for call in mock_run.call_args_list
     )
+
+
+@patch("subprocess.run")
+def test_changed_custom_stack_adopts_pinned_verified_state_without_deploy(
+    mock_run, stack_manager, tmp_path
+):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  db:\n    image: mariadb:11\n")
+    previous_hash = "1" * 64
+    desired_hash = stack_manager._calculate_stack_hash(
+        [compose_file],
+        None,
+        ["scripts/deploy-stack.sh", "databases"],
+    )
+    stack_config = StackConfig(
+        name="databases",
+        compose_file="compose.yml",
+        deploy_command=["scripts/deploy-stack.sh", "databases"],
+        adopt_state={"from_hash": previous_hash, "to_hash": desired_hash},
+    )
+    stack_manager.deployed_stacks["databases"] = previous_hash
+    stack_manager.deployed_service_images["databases"] = {"db": "mariadb:11"}
+    persisted = PersistedStackState(
+        status="tracked",
+        service_names=["databases_db"],
+        stack_hash=previous_hash,
+        service_images={"db": "mariadb:11"},
+        live_service_images={"db": "docker.io/library/mariadb:11"},
+        service_hashes={},
+        service_hash_version=SERVICE_HASH_VERSION,
+    )
+
+    with patch.object(
+        stack_manager, "_discover_persisted_stack_state", return_value=persisted
+    ), patch.object(
+        stack_manager,
+        "_custom_stack_services_converged",
+        return_value=(True, "all services match desired replicas"),
+    ), patch.object(
+        stack_manager, "_persist_stack_state", return_value=True
+    ) as persist:
+        result = stack_manager.deploy_stack(
+            stack_config,
+            [compose_file],
+            working_directory=tmp_path,
+        )
+
+    assert result == DeployResult(
+        status="unchanged",
+        detail="adopted explicitly verified live state without updating service specs",
+    )
+    persist.assert_called_once_with(
+        "databases", desired_hash, {"db": "mariadb:11"}, {}
+    )
+    assert stack_manager.deployed_stacks["databases"] == desired_hash
+    mock_run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("from_hash", "to_hash", "expected_detail"),
+    [
+        ("0" * 64, None, "adopt_state.from_hash"),
+        (None, "0" * 64, "adopt_state.to_hash"),
+    ],
+)
+def test_changed_custom_stack_rejects_stale_adoption_hashes(
+    stack_manager, tmp_path, from_hash, to_hash, expected_detail
+):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  db:\n    image: mariadb:11\n")
+    previous_hash = "1" * 64
+    desired_hash = stack_manager._calculate_stack_hash(
+        [compose_file],
+        None,
+        ["scripts/deploy-stack.sh", "databases"],
+    )
+    stack_config = StackConfig(
+        name="databases",
+        compose_file="compose.yml",
+        deploy_command=["scripts/deploy-stack.sh", "databases"],
+        adopt_state={
+            "from_hash": from_hash or previous_hash,
+            "to_hash": to_hash or desired_hash,
+        },
+    )
+    stack_manager.deployed_stacks["databases"] = previous_hash
+    stack_manager.deployed_service_images["databases"] = {"db": "mariadb:11"}
+
+    with patch.object(stack_manager, "_persist_stack_state") as persist:
+        result = stack_manager.deploy_stack(stack_config, [compose_file])
+
+    assert result.status == "failed"
+    assert expected_detail in result.detail
+    persist.assert_not_called()
+
+
+def test_changed_custom_stack_rejects_live_image_mismatch(stack_manager, tmp_path):
+    compose_file = tmp_path / "compose.yml"
+    compose_file.write_text("services:\n  db:\n    image: mariadb:11\n")
+    previous_hash = "1" * 64
+    desired_hash = stack_manager._calculate_stack_hash(
+        [compose_file],
+        None,
+        ["scripts/deploy-stack.sh", "databases"],
+    )
+    stack_config = StackConfig(
+        name="databases",
+        compose_file="compose.yml",
+        deploy_command=["scripts/deploy-stack.sh", "databases"],
+        adopt_state={"from_hash": previous_hash, "to_hash": desired_hash},
+    )
+    stack_manager.deployed_stacks["databases"] = previous_hash
+    stack_manager.deployed_service_images["databases"] = {"db": "mariadb:10"}
+    persisted = PersistedStackState(
+        status="tracked",
+        service_names=["databases_db"],
+        stack_hash=previous_hash,
+        service_images={"db": "mariadb:10"},
+        live_service_images={"db": "mariadb:10"},
+        service_hash_version=SERVICE_HASH_VERSION,
+    )
+
+    with patch.object(
+        stack_manager, "_discover_persisted_stack_state", return_value=persisted
+    ), patch.object(
+        stack_manager,
+        "_custom_stack_services_converged",
+        return_value=(True, "all services match desired replicas"),
+    ), patch.object(stack_manager, "_persist_stack_state") as persist:
+        result = stack_manager.deploy_stack(stack_config, [compose_file])
+
+    assert result.status == "failed"
+    assert "live service images" in result.detail
+    persist.assert_not_called()
+
+
+@patch("subprocess.run")
+def test_custom_stack_convergence_requires_exact_service_set_and_replicas(
+    mock_run, stack_manager
+):
+    mock_run.return_value = Mock(
+        stdout="databases_db|1/1\ndatabases_replica|0/1\n",
+        returncode=0,
+    )
+
+    converged, detail = stack_manager._custom_stack_services_converged(
+        "databases",
+        ["databases_db", "databases_replica"],
+    )
+
+    assert converged is False
+    assert detail == "databases_replica=0/1"
 
 
 @patch('subprocess.run')

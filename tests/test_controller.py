@@ -135,6 +135,69 @@ def test_load_stacks_config_validates_deploy_command(
 
 @patch('src.controller.GitRepository')
 @patch('src.controller.SwarmStackManager')
+def test_load_stacks_config_validates_adopt_state(
+    mock_stack_manager, mock_git_repo, config_file, tmp_path
+):
+    valid_hash = "a" * 64
+    stacks_file = tmp_path / "stacks.yml"
+    stacks_file.write_text(
+        yaml.safe_dump(
+            {
+                "stacks": [
+                    {
+                        "name": "valid",
+                        "compose_file": "valid.yml",
+                        "deploy_command": ["scripts/deploy-stack.sh", "valid"],
+                        "adopt_state": {
+                            "from_hash": valid_hash,
+                            "to_hash": "b" * 64,
+                        },
+                    },
+                    {
+                        "name": "not-custom",
+                        "compose_file": "not-custom.yml",
+                        "adopt_state": {
+                            "from_hash": valid_hash,
+                            "to_hash": "b" * 64,
+                        },
+                    },
+                    {
+                        "name": "bad-hash",
+                        "compose_file": "bad-hash.yml",
+                        "deploy_command": ["scripts/deploy-stack.sh", "bad-hash"],
+                        "adopt_state": {
+                            "from_hash": "not-a-hash",
+                            "to_hash": "b" * 64,
+                        },
+                    },
+                    {
+                        "name": "extra-key",
+                        "compose_file": "extra-key.yml",
+                        "deploy_command": ["scripts/deploy-stack.sh", "extra-key"],
+                        "adopt_state": {
+                            "from_hash": valid_hash,
+                            "to_hash": "b" * 64,
+                            "force": True,
+                        },
+                    },
+                ]
+            }
+        )
+    )
+    hivemind = HiveMind(config_file)
+    hivemind.git_repo.get_file_path = Mock(return_value=stacks_file)
+
+    stacks = hivemind._load_stacks_config()
+
+    assert [stack.name for stack in stacks] == ["valid"]
+    assert stacks[0].adopt_state == {
+        "from_hash": valid_hash,
+        "to_hash": "b" * 64,
+    }
+
+
+@patch('src.controller.GitRepository')
+@patch('src.controller.SwarmStackManager')
 def test_load_stacks_config_from_hivemind_config(mock_stack_manager, mock_git_repo, tmp_path):
     """Test loading stacks from HiveMind config when repo file doesn't exist"""
     config = {

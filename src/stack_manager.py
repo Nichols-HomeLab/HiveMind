@@ -34,6 +34,7 @@ class StackConfig:
     env_file: Optional[str] = None
     replaces: Optional[List[str]] = None
     deploy_command: Optional[List[str]] = None
+    adopt_state: Optional[Dict[str, str]] = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +188,24 @@ class SwarmStackManager:
                     image_changes = self._describe_image_changes(
                         stack.name, previous_images, service_images
                     )
+                    if stack.deploy_command:
+                        if stack.adopt_state:
+                            return self._adopt_custom_stack_state(
+                                stack,
+                                compose_hash,
+                                previous_hash,
+                                service_images,
+                            )
+                        detail = (
+                            f"Refusing automatic update for {stack.name}: its custom "
+                            "deploy command is stack-scoped and cannot prove that only "
+                            f"changed services will be updated. Persisted state hash: "
+                            f"{previous_hash}. Desired state hash: {compose_hash}. After "
+                            "manually applying and verifying the exact desired state, set "
+                            "adopt_state.from_hash and adopt_state.to_hash to those values"
+                        )
+                        logger.error(detail)
+                        return DeployResult(status="failed", detail=detail)
             else:
                 logger.info(f"Stack {stack.name} is new, deploying")
                 image_changes = self._describe_new_services(stack.name, service_images)
@@ -208,14 +227,6 @@ class SwarmStackManager:
             try:
                 result = None
                 if stack.deploy_command:
-                    if status == "updated":
-                        detail = (
-                            f"Refusing automatic update for {stack.name}: its custom "
-                            "deploy command is stack-scoped and cannot prove that only "
-                            "changed services will be updated"
-                        )
-                        logger.error(detail)
-                        return DeployResult(status="failed", detail=detail)
                     if status == "updated" and update_guard:
                         allowed, detail = update_guard(stack.name, None)
                         if not allowed:
@@ -410,6 +421,144 @@ class SwarmStackManager:
         except Exception as e:
             logger.error(f"Unexpected error deploying stack {stack.name}: {e}", exc_info=True)
             return DeployResult(status="failed", detail=str(e))
+
+    def _adopt_custom_stack_state(
+        self,
+        stack: StackConfig,
+        compose_hash: str,
+        previous_hash: str,
+        service_images: Dict[str, str],
+    ) -> DeployResult:
+        """Adopt an explicitly verified custom stack without changing service specs."""
+        adopt_state = stack.adopt_state or {}
+        if adopt_state.get("from_hash") != previous_hash:
+            detail = (
+                f"Refusing state adoption for {stack.name}: adopt_state.from_hash does "
+                f"not match the persisted state hash {previous_hash}"
+            )
+            logger.error(detail)
+            return DeployResult(status="failed", detail=detail)
+        if adopt_state.get("to_hash") != compose_hash:
+            detail = (
+                f"Refusing state adoption for {stack.name}: adopt_state.to_hash does not "
+                f"match the current desired state hash {compose_hash}"
+            )
+            logger.error(detail)
+            return DeployResult(status="failed", detail=detail)
+
+        persisted = self._discover_persisted_stack_state(stack.name)
+        if persisted.status != "tracked":
+            detail = (
+                f"Refusing state adoption for {stack.name}: persisted state is "
+                f"{persisted.status}"
+            )
+            if persisted.detail:
+                detail = f"{detail}: {persisted.detail}"
+            logger.error(detail)
+            return DeployResult(status="failed", detail=detail)
+        if persisted.service_hash_version != SERVICE_HASH_VERSION:
+            detail = (
+                f"Refusing state adoption for {stack.name}: persisted state version "
+                f"{persisted.service_hash_version} is not {SERVICE_HASH_VERSION}"
+            )
+            logger.error(detail)
+            return DeployResult(status="failed", detail=detail)
+        if persisted.stack_hash != previous_hash:
+            detail = (
+                f"Refusing state adoption for {stack.name}: persisted state changed "
+                "during reconciliation"
+            )
+            logger.error(detail)
+            return DeployResult(status="failed", detail=detail)
+
+        converged, convergence_detail = self._custom_stack_services_converged(
+            stack.name,
+            persisted.service_names,
+        )
+        if not converged:
+            detail = (
+                f"Refusing state adoption for {stack.name}: live services are not "
+                f"converged: {convergence_detail}"
+            )
+            logger.error(detail)
+            return DeployResult(status="failed", detail=detail)
+
+        live_images = self._normalize_image_map(persisted.live_service_images)
+        desired_images = self._normalize_image_map(service_images)
+        if live_images != desired_images:
+            detail = (
+                f"Refusing state adoption for {stack.name}: live service images do not "
+                "match the desired images"
+            )
+            logger.error(detail)
+            return DeployResult(status="failed", detail=detail)
+
+        if not self._persist_stack_state(
+            stack.name,
+            compose_hash,
+            service_images,
+            {},
+        ):
+            return DeployResult(
+                status="failed",
+                detail=f"Failed to persist adopted state for {stack.name}",
+            )
+
+        self.deployed_stacks[stack.name] = compose_hash
+        self.deployed_service_images[stack.name] = service_images
+        self.deployed_service_hashes[stack.name] = {}
+        detail = "adopted explicitly verified live state without updating service specs"
+        logger.warning("Stack %s %s", stack.name, detail)
+        return DeployResult(status="unchanged", detail=detail)
+
+    def _custom_stack_services_converged(
+        self,
+        stack_name: str,
+        expected_service_names: List[str],
+    ) -> Tuple[bool, str]:
+        """Require every live service in a custom stack to match desired replicas."""
+        try:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "stack",
+                    "services",
+                    stack_name,
+                    "--format",
+                    "{{.Name}}|{{.Replicas}}",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            return False, (exc.stderr or str(exc)).strip()
+
+        observed_names: set[str] = set()
+        mismatches: List[str] = []
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                service_name, replicas_text = line.split("|", 1)
+                replicas = replicas_text.split()[0]
+                running_text, desired_text = replicas.split("/", 1)
+                running = int(running_text)
+                desired = int(desired_text)
+            except (ValueError, IndexError):
+                return False, f"could not parse service status: {line}"
+            observed_names.add(service_name)
+            if running != desired:
+                mismatches.append(f"{service_name}={running}/{desired}")
+
+        expected_names = set(expected_service_names)
+        if observed_names != expected_names:
+            missing = sorted(expected_names - observed_names)
+            extra = sorted(observed_names - expected_names)
+            return False, f"service set mismatch (missing={missing}, extra={extra})"
+        if mismatches:
+            return False, ", ".join(mismatches)
+        return True, "all services match desired replicas"
     
     def remove_stack(self, stack_name: str) -> bool:
         """Remove a Docker stack"""

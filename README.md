@@ -106,6 +106,25 @@ whose rendered definitions are unchanged are not rolled. Deleted services are re
 individually. Custom `deploy_command` stacks remain command-scoped because HiveMind cannot
 safely split an arbitrary external deployment script.
 
+When an operator has already applied and verified a custom-command stack change through a
+separate cluster-aware procedure, HiveMind can adopt that exact live state without running the
+custom command or changing any service. The fail-closed log message supplies the persisted and
+desired SHA-256 hashes. Pin both values in the stack entry:
+
+```yaml
+deploy_command: [scripts/deploy-stack.sh, databases]
+adopt_state:
+  from_hash: <persisted-state-sha256>
+  to_hash: <verified-desired-state-sha256>
+```
+
+Adoption succeeds only when both hashes match, the persisted state is current, every live service
+name and normalized image matches the desired stack, and all services match their desired replica
+counts. It updates only HiveMind's Swarm config bookkeeping. Remove `adopt_state` after the
+successful reconciliation; its removal does not change the stack hash. A later stack change has a
+different desired hash and therefore fails closed until it is separately applied, verified, and
+explicitly adopted.
+
 HiveMind can also protect existing Plex and Jellyfin services from disruptive updates. A
 protected service update is first attempted during the configured midnight window. If the
 corresponding server API reports that a movie or episode is playing, HiveMind retries with
